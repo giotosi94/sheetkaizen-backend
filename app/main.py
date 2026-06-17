@@ -7,9 +7,7 @@ app = FastAPI(title="SheetKaizen API", version="1.0.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "https://sheetkaizen-frontend.vercel.app",
+    allow_origins=["*"],
     ],
     allow_credentials=True,
     allow_methods=["*"],
