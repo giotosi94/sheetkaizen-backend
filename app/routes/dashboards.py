@@ -8,7 +8,21 @@ import copy
 router = APIRouter()
 
 
-@router detail="Dashboard non trovata")@router.get("/")
+@router.get("/")
+async def get_dashboards():
+    dashboards = []
+    cursor = db.dashboards.find({}).sort("created_at", -1)
+    async for d in cursor:
+        d["_id"] = str(d["_id"])
+        dashboards.append(d)
+    return dashboards
+
+
+@router.get("/{dashboard_id}")
+async def get_dashboard(dashboard_id: str):
+    dashboard = await db.dashboards.find_one({"_id": ObjectId(dashboard_id)})
+    if not dashboard:
+        raise HTTPException(status_code=404, detail="Dashboard non trovata")
     dashboard["_id"] = str(dashboard["_id"])
     return dashboard
 
@@ -61,16 +75,3 @@ async def delete_dashboard(dashboard_id: str):
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Dashboard non trovata")
     return {"message": "Dashboard eliminata"}
-async def get_dashboards():
-    dashboards = []
-    cursor = db.dashboards.find({}).sort("created_at", -1)
-    async for d in cursor:
-        d["_id"] = str(d["_id"])
-        dashboards.append(d)
-    return dashboards
-
-
-@router.get("/{dashboard_id}")
-async def get_dashboard(dashboard_id: str):
-    dashboard = await db.dashboards.find_one({"_id": ObjectId(dashboard_id)})
-    if not dashboard:
