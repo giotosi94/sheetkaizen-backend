@@ -2,7 +2,8 @@ from fastapi import Depends, HTTPException
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import jwt
 from app.config import settings
-from app.database import database
+from app.database import db
+from bson import ObjectId
 
 security = HTTPBearer()
 
@@ -19,7 +20,6 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Token non valido")
 
-    from bson import ObjectId
     user = await db.users.find_one({"_id": ObjectId(user_id)})
     if user is None:
         raise HTTPException(status_code=401, detail="Utente non trovato")
