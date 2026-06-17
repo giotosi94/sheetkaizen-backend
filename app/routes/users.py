@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, Depends
-from app.database import db
+from app.database import database
 from app.models.user import UserUpdate
 from app.middleware.auth import get_current_user, require_admin
 from bson import ObjectId
