@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, Depends
-from app.database import db
+from app.database import database
 from app.models.kaizen import KaizenCreate, KaizenUpdate
 from app.middleware.auth import get_current_user
 from bson import ObjectId
