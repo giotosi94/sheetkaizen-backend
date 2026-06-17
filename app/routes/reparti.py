@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, Depends
-from app.database import db
+from app.database import database
 from app.models.reparto import RepartoCreate, RepartoUpdate
 from app.middleware.auth import require_admin
 from bson import ObjectId
