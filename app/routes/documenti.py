@@ -101,6 +101,8 @@ async def get_documento(documento_id: str):
 # ============================================================
 # UPLOAD
 # ============================================================
+from app.utils.compressor import compress_file
+
 @router.post("/upload")
 async def upload_documento(
     file: UploadFile = File(...),
@@ -113,15 +115,25 @@ async def upload_documento(
     autore: Optional[str] = Form(None),
     descrizione: Optional[str] = Form(None),
     tag: Optional[str] = Form(None),
+    compress: bool = Form(True),  # ← NUOVO: utente può disabilitare via UI
 ):
-    """Upload nuovo documento OPL/SOP con file allegato."""
     contents = await file.read()
     if len(contents) > 50 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="File troppo grande (max 50MB)")
 
+    original_size = len(contents)
+    final_filename = file.filename
+    compression_info = {}
+
+    # 🗜️ COMPRESSIONE AUTOMATICA
+    if compress:
+        contents, final_filename, compression_info = compress_file(
+            contents, file.filename, file.content_type or ""
+        )
+
     bucket = get_bucket()
     file_id = await bucket.upload_from_stream(
-        file.filename,
+        final_filename,
         contents,
         metadata={
             "content_type": file.content_type,
@@ -149,9 +161,12 @@ async def upload_documento(
         "stato": "Bozza",
         "versione": 1,
         "file_id": str(file_id),
-        "file_name": file.filename,
+        "file_name": final_filename,
+        "file_name_originale": file.filename,
         "file_size": len(contents),
+        "file_size_originale": original_size,
         "file_content_type": file.content_type,
+        "compressione": compression_info,  # ← NUOVO: salva info compressione
         "versioni_precedenti": [],
         "kaizen_collegati": [],
         "source": "manual_upload",
@@ -162,57 +177,13 @@ async def upload_documento(
         "updated_at": datetime.now(timezone.utc),
     }
     result = await db.documenti.insert_one(doc)
+
     return {
         "id": str(result.inserted_id),
         "numero": numero,
         "message": f"Documento {numero} creato",
+        "compressione": compression_info,  # ← restituisce info per UI
     }
-
-
-@router.post("/{documento_id}/upload-version")
-async def upload_new_version(documento_id: str, file: UploadFile = File(...)):
-    """Carica una nuova versione di un documento esistente."""
-    doc = await db.documenti.find_one({"_id": ObjectId(documento_id)})
-    if not doc:
-        raise HTTPException(status_code=404, detail="Documento non trovato")
-
-    contents = await file.read()
-    if len(contents) > 50 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="File troppo grande (max 50MB)")
-
-    bucket = get_bucket()
-    file_id = await bucket.upload_from_stream(
-        file.filename,
-        contents,
-        metadata={
-            "content_type": file.content_type,
-            "uploaded_at": datetime.now(timezone.utc).isoformat(),
-        },
-    )
-
-    nuova_versione = doc.get("versione", 1) + 1
-    versioni_precedenti = doc.get("versioni_precedenti", [])
-    versioni_precedenti.append({
-        "versione": doc.get("versione", 1),
-        "file_id": doc.get("file_id"),
-        "file_name": doc.get("file_name"),
-        "data": doc.get("updated_at"),
-    })
-
-    await db.documenti.update_one(
-        {"_id": ObjectId(documento_id)},
-        {"$set": {
-            "versione": nuova_versione,
-            "file_id": str(file_id),
-            "file_name": file.filename,
-            "file_size": len(contents),
-            "file_content_type": file.content_type,
-            "versioni_precedenti": versioni_precedenti,
-            "stato": "In Revisione",
-            "updated_at": datetime.now(timezone.utc),
-        }}
-    )
-    return {"message": f"Versione {nuova_versione} caricata"}
 
 
 # ============================================================
