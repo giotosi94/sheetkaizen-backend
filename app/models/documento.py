@@ -1,19 +1,17 @@
 from pydantic import BaseModel
 from typing import Optional, List
-from datetime import datetime
 
 
 class DocumentoCreate(BaseModel):
     titolo: str
     tipo: str = "OPL"  # OPL | SOP | Procedura | Istruzione
-    categoria: Optional[str] = None  # Operativa, Sicurezza, Manutenzione, Qualità, Pulizia, ecc.
+    categoria: Optional[str] = None
     reparto: Optional[str] = None
     linea: Optional[str] = None
     macchina: Optional[str] = None
     autore: Optional[str] = None
     descrizione: Optional[str] = None
     tag: List[str] = []
-    stato: str = "Bozza"  # Bozza | In Revisione | Approvato | Obsoleto
 
 
 class DocumentoUpdate(BaseModel):
@@ -26,7 +24,4 @@ class DocumentoUpdate(BaseModel):
     autore: Optional[str] = None
     descrizione: Optional[str] = None
     tag: Optional[List[str]] = None
-    stato: Optional[str] = None
-    data_revisione: Optional[datetime] = None
-    approvatore: Optional[str] = None
-    data_approvazione: Optional[datetime] = None
+    stato: Optional[str] = None  # Bozza | In Revisione | Approvato | Obsoleto
