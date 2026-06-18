@@ -8,13 +8,14 @@ import io
 
 from app.database import db
 from app.models.documento import DocumentoCreate, DocumentoUpdate
+from app.utils.compressor import compress_file
 
 router = APIRouter()
 
 
 def get_bucket():
     """Restituisce il bucket GridFS, garantendo connessione attiva."""
-    db._ensure()  # forza connessione se non ancora aperta
+    db._ensure()
     return AsyncIOMotorGridFSBucket(db._db, bucket_name="documenti_files")
 
 
@@ -99,10 +100,8 @@ async def get_documento(documento_id: str):
 
 
 # ============================================================
-# UPLOAD
+# UPLOAD (nuovo documento)
 # ============================================================
-from app.utils.compressor import compress_file
-
 @router.post("/upload")
 async def upload_documento(
     file: UploadFile = File(...),
@@ -115,7 +114,7 @@ async def upload_documento(
     autore: Optional[str] = Form(None),
     descrizione: Optional[str] = Form(None),
     tag: Optional[str] = Form(None),
-    compress: bool = Form(True),  # ← NUOVO: utente può disabilitare via UI
+    compress: bool = Form(True),
 ):
     contents = await file.read()
     if len(contents) > 50 * 1024 * 1024:
@@ -166,7 +165,7 @@ async def upload_documento(
         "file_size": len(contents),
         "file_size_originale": original_size,
         "file_content_type": file.content_type,
-        "compressione": compression_info,  # ← NUOVO: salva info compressione
+        "compressione": compression_info,
         "versioni_precedenti": [],
         "kaizen_collegati": [],
         "source": "manual_upload",
@@ -182,7 +181,76 @@ async def upload_documento(
         "id": str(result.inserted_id),
         "numero": numero,
         "message": f"Documento {numero} creato",
-        "compressione": compression_info,  # ← restituisce info per UI
+        "compressione": compression_info,
+    }
+
+
+# ============================================================
+# UPLOAD NUOVA VERSIONE
+# ============================================================
+@router.post("/{documento_id}/upload-version")
+async def upload_new_version(
+    documento_id: str,
+    file: UploadFile = File(...),
+    compress: bool = Form(True),
+):
+    """Carica una nuova versione di un documento esistente."""
+    doc = await db.documenti.find_one({"_id": ObjectId(documento_id)})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Documento non trovato")
+
+    contents = await file.read()
+    if len(contents) > 50 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="File troppo grande (max 50MB)")
+
+    original_size = len(contents)
+    final_filename = file.filename
+    compression_info = {}
+
+    # 🗜️ COMPRESSIONE AUTOMATICA
+    if compress:
+        contents, final_filename, compression_info = compress_file(
+            contents, file.filename, file.content_type or ""
+        )
+
+    bucket = get_bucket()
+    file_id = await bucket.upload_from_stream(
+        final_filename,
+        contents,
+        metadata={
+            "content_type": file.content_type,
+            "uploaded_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+
+    nuova_versione = doc.get("versione", 1) + 1
+    versioni_precedenti = doc.get("versioni_precedenti", [])
+    versioni_precedenti.append({
+        "versione": doc.get("versione", 1),
+        "file_id": doc.get("file_id"),
+        "file_name": doc.get("file_name"),
+        "data": doc.get("updated_at"),
+    })
+
+    await db.documenti.update_one(
+        {"_id": ObjectId(documento_id)},
+        {"$set": {
+            "versione": nuova_versione,
+            "file_id": str(file_id),
+            "file_name": final_filename,
+            "file_name_originale": file.filename,
+            "file_size": len(contents),
+            "file_size_originale": original_size,
+            "file_content_type": file.content_type,
+            "compressione": compression_info,
+            "versioni_precedenti": versioni_precedenti,
+            "stato": "In Revisione",
+            "updated_at": datetime.now(timezone.utc),
+        }}
+    )
+    return {
+        "message": f"Versione {nuova_versione} caricata",
+        "compressione": compression_info,
     }
 
 
@@ -214,8 +282,37 @@ async def download_file(documento_id: str, download: bool = False):
             media_type=content_type,
             headers={
                 "Content-Disposition": f'{disposition}; filename="{filename}"',
-                "Access-Control-Allow-Origin": "*",  # serve a Office Viewer
+                "Access-Control-Allow-Origin": "*",
             },
+        )
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=f"File non trovato: {str(e)}")
+
+
+@router.get("/{documento_id}/version/{versione}")
+async def download_version(documento_id: str, versione: int):
+    """Scarica una versione precedente specifica del documento."""
+    doc = await db.documenti.find_one({"_id": ObjectId(documento_id)})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Documento non trovato")
+    if doc.get("versione") == versione:
+        return await download_file(documento_id)
+    versioni = doc.get("versioni_precedenti", [])
+    target = next((v for v in versioni if v["versione"] == versione), None)
+    if not target:
+        raise HTTPException(status_code=404, detail=f"Versione {versione} non trovata")
+    bucket = get_bucket()
+    try:
+        stream = await bucket.open_download_stream(ObjectId(target["file_id"]))
+        content_type = (
+            stream.metadata.get("content_type", "application/octet-stream")
+            if stream.metadata else "application/octet-stream"
+        )
+        data = await stream.read()
+        return StreamingResponse(
+            io.BytesIO(data),
+            media_type=content_type,
+            headers={"Content-Disposition": f'inline; filename="{target.get("file_name", "documento")}"'},
         )
     except Exception as e:
         raise HTTPException(status_code=404, detail=f"File non trovato: {str(e)}")
