@@ -253,6 +253,188 @@ async def upload_new_version(
         "compressione": compression_info,
     }
 
+# ============================================================
+# BULK SMART UPLOAD — Upload multiplo con auto-parsing nomi
+# ============================================================
+import re
+
+@router.post("/bulk-upload")
+async def bulk_upload_documenti(
+    files: list[UploadFile] = File(...),
+    autore: Optional[str] = Form(None),
+    compress: bool = Form(True),
+):
+    """
+    Carica N file in batch.
+    Auto-estrae tipo/numero/titolo dal nome file con convenzione:
+      TIPO-ANNO-NUM_Titolo_Documento.ext
+      Es: OPL-2026-001_Pulizia_Filtro_Bindler.pdf
+    
+    Se il nome NON rispetta la convenzione, usa il filename come titolo
+    e assegna numero progressivo automatico.
+    
+    Se il numero esiste già → crea nuova versione automaticamente.
+    """
+    if not files:
+        raise HTTPException(status_code=400, detail="Nessun file ricevuto")
+
+    results = {
+        "totale": len(files),
+        "creati": [],
+        "aggiornati": [],  # nuove versioni
+        "errori": [],
+        "risparmio_totale_bytes": 0,
+    }
+    
+    # Pattern per parsing nome file
+    pattern = r"^(OPL|SOP|PROC|IST)-(\d{4})-(\d+)_(.+?)\.(pdf|docx|xlsx|pptx|png|jpg|jpeg|doc|xls|ppt)$"
+    
+    bucket = get_bucket()
+    
+    for file in files:
+        try:
+            contents = await file.read()
+            if len(contents) > 50 * 1024 * 1024:
+                results["errori"].append({
+                    "filename": file.filename,
+                    "errore": "File troppo grande (max 50MB)"
+                })
+                continue
+            
+            original_size = len(contents)
+            
+            # 🔍 Parsing nome file
+            match = re.match(pattern, file.filename, re.IGNORECASE)
+            
+            if match:
+                # ✅ Nome conforme — estrai metadati
+                tipo_raw = match.group(1).upper()
+                tipo_map = {"OPL": "OPL", "SOP": "SOP", "PROC": "Procedura", "IST": "Istruzione"}
+                tipo = tipo_map.get(tipo_raw, "OPL")
+                
+                anno = match.group(2)
+                num = match.group(3)
+                titolo_raw = match.group(4)
+                titolo = titolo_raw.replace("_", " ").strip()
+                numero_completo = f"{tipo_raw}-{anno}-{num}"
+                auto_parsed = True
+            else:
+                # ⚠️ Nome non conforme — usa filename come titolo
+                tipo = "OPL"
+                titolo = file.filename.rsplit(".", 1)[0].replace("_", " ").replace("-", " ")
+                numero_completo = await get_next_numero(tipo)
+                auto_parsed = False
+            
+            # 🔍 Controllo duplicati
+            esistente = await db.documenti.find_one({"numero": numero_completo})
+            
+            # 🗜️ Compressione
+            final_filename = file.filename
+            compression_info = {}
+            if compress:
+                contents, final_filename, compression_info = compress_file(
+                    contents, file.filename, file.content_type or ""
+                )
+            
+            results["risparmio_totale_bytes"] += (original_size - len(contents))
+            
+            # 💾 Salva file su GridFS
+            file_id = await bucket.upload_from_stream(
+                final_filename,
+                contents,
+                metadata={
+                    "content_type": file.content_type,
+                    "uploaded_at": datetime.now(timezone.utc).isoformat(),
+                    "source": "bulk_upload",
+                }
+            )
+            
+            if esistente:
+                # 🔄 NUOVA VERSIONE
+                nuova_versione = esistente.get("versione", 1) + 1
+                versioni_precedenti = esistente.get("versioni_precedenti", [])
+                versioni_precedenti.append({
+                    "versione": esistente.get("versione", 1),
+                    "file_id": esistente.get("file_id"),
+                    "file_name": esistente.get("file_name"),
+                    "data": esistente.get("updated_at"),
+                })
+                
+                await db.documenti.update_one(
+                    {"_id": esistente["_id"]},
+                    {"$set": {
+                        "versione": nuova_versione,
+                        "file_id": str(file_id),
+                        "file_name": final_filename,
+                        "file_name_originale": file.filename,
+                        "file_size": len(contents),
+                        "file_size_originale": original_size,
+                        "compressione": compression_info,
+                        "versioni_precedenti": versioni_precedenti,
+                        "stato": "Bozza",
+                        "updated_at": datetime.now(timezone.utc),
+                    }}
+                )
+                results["aggiornati"].append({
+                    "filename": file.filename,
+                    "numero": numero_completo,
+                    "titolo": titolo,
+                    "versione": nuova_versione,
+                    "compressione": compression_info,
+                })
+            else:
+                # ➕ NUOVO DOCUMENTO
+                doc = {
+                    "numero": numero_completo,
+                    "titolo": titolo,
+                    "tipo": tipo,
+                    "categoria": "Da classificare",
+                    "reparto": "",
+                    "linea": "",
+                    "macchina": "",
+                    "autore": autore or "Bulk Upload",
+                    "descrizione": "",
+                    "tag": ["bulk-import"] + (["auto-parsed"] if auto_parsed else ["manual-title"]),
+                    "stato": "Bozza",
+                    "versione": 1,
+                    "file_id": str(file_id),
+                    "file_name": final_filename,
+                    "file_name_originale": file.filename,
+                    "file_size": len(contents),
+                    "file_size_originale": original_size,
+                    "file_content_type": file.content_type,
+                    "compressione": compression_info,
+                    "versioni_precedenti": [],
+                    "kaizen_collegati": [],
+                    "source": "bulk_upload",
+                    "sharepoint_path": None,
+                    "sharepoint_id": None,
+                    "is_active": True,
+                    "created_at": datetime.now(timezone.utc),
+                    "updated_at": datetime.now(timezone.utc),
+                }
+                result = await db.documenti.insert_one(doc)
+                results["creati"].append({
+                    "filename": file.filename,
+                    "numero": numero_completo,
+                    "titolo": titolo,
+                    "id": str(result.inserted_id),
+                    "auto_parsed": auto_parsed,
+                    "compressione": compression_info,
+                })
+        
+        except Exception as e:
+            results["errori"].append({
+                "filename": file.filename,
+                "errore": str(e)
+            })
+    
+    # 📊 Riepilogo finale
+    results["risparmio_totale_mb"] = round(results["risparmio_totale_bytes"] / 1024 / 1024, 2)
+    results["successo"] = len(results["creati"]) + len(results["aggiornati"])
+    results["fallimenti"] = len(results["errori"])
+    
+    return results
 
 # ============================================================
 # DOWNLOAD
