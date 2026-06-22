@@ -4,11 +4,11 @@ from datetime import datetime
 
 
 # ============================================================
-# ENUMS (validazione lato modello)
+# TIPI (str per supportare valori dinamici configurabili dalle Settings)
 # ============================================================
-TIPO_AP = Literal["Task", "Bug", "Improvement", "Audit", "Manutenzione", "Sicurezza"]
-PRIORITA = Literal["Lowest", "Low", "Medium", "High", "Critical"]
-STATO = Literal["Backlog", "Aperto", "In Corso", "In Verifica", "Done", "Cancelled"]
+TIPO_AP = str
+PRIORITA = str
+STATO = str
 
 
 # ============================================================
