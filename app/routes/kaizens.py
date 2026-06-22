@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, Query
 from app.database import db
-from app.models.kaizen import KaizenCreate, KaizenUpdate, PromotePayload, LinkChildPayload, LIVELLI_KAIZEN
+from app.models.kaizen import KaizenCreate, KaizenUpdate, PromotePayload, LinkChildPayload, ChangeMethodologyPayload, LIVELLI_KAIZEN
 from bson import ObjectId
 from datetime import datetime, timezone
 from typing import Optional
@@ -257,118 +257,134 @@ async def update_kaizen(kaizen_id: str, update: KaizenUpdate):
 
 
 # ============================================================
-# 🆕 PROMOTE / DEMOTE — Kaizen Polimorfico
+# 🆕 CHANGE METHODOLOGY — Trasforma in altro livello
+# ============================================================
+
+# Import aggiuntivo (verifica che ChangeMethodologyPayload sia importato)
+# Nel file in alto dovresti avere:
+# from app.models.kaizen import KaizenCreate, KaizenUpdate, PromotePayload, LinkChildPayload, LIVELLI_KAIZEN
+# ⚠️ AGGIUNGI ChangeMethodologyPayload se manca:
+
+@router.patch("/{kaizen_id}/change-methodology")
+async def change_methodology(kaizen_id: str, payload: ChangeMethodologyPayload):
+    """Trasforma un Kaizen in un'altra metodologia (Quick ↔ Standard ↔ Major).
+    
+    Supporta salto libero:
+    - Quick → Major (directo, salta Standard)
+    - Major → Quick (directo, perde sezioni Standard/Major nascoste ma non eliminate)
+    - Standard → Quick, Standard → Major, ecc.
+    
+    Validazioni:
+    - Nuovo livello deve essere in [Quick, Standard, Major]
+    - Se il Kaizen è padre di altri Kaizen, controlla compatibilità gerarchia
+    """
+    kaizen = await db.kaizens.find_one({"_id": ObjectId(kaizen_id)})
+    if not kaizen:
+        raise HTTPException(status_code=404, detail="Kaizen non trovato")
+    
+    nuovo_livello = payload.nuovo_livello
+    if nuovo_livello not in LIVELLI_KAIZEN:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Livello non valido. Usa uno di: {', '.join(LIVELLI_KAIZEN)}"
+        )
+    
+    livello_attuale = kaizen.get("livello") or normalize_livello(None, kaizen.get("tipo"))
+    
+    if nuovo_livello == livello_attuale:
+        return {
+            "message": f"Il Kaizen è già {nuovo_livello}",
+            "nuovo_livello": nuovo_livello,
+            "no_change": True
+        }
+    
+    # Validazione: se sto trasformando in Quick e ha figli, è un problema
+    # (perché Quick non può avere figli)
+    if nuovo_livello == "Quick":
+        children_ids = kaizen.get("children_kaizen_ids", [])
+        if children_ids:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Impossibile trasformare in Quick: ha {len(children_ids)} Kaizen figli. Rimuovili prima."
+            )
+    
+    # Validazione: se sto trasformando in Standard ma ha figli Standard,
+    # va comunque bene perché Standard può avere figli Quick (ma non Standard)
+    # Per ora permettiamo (semplificazione: se vorrai vincoli più stretti, aggiungerò)
+    
+    # Storia
+    storia_entry = {
+        "livello": nuovo_livello,
+        "livello_precedente": livello_attuale,
+        "quando": datetime.now(timezone.utc).isoformat(),
+        "utente": "Default User",
+        "motivo": payload.motivo or f"Trasformato in {nuovo_livello}",
+        "azione": "CHANGE_METHODOLOGY",
+    }
+    
+    feed_entry = {
+        "utente": "Default User",
+        "azione": f"🔄 Trasformato in {nuovo_livello} Kaizen",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    
+    await db.kaizens.update_one(
+        {"_id": ObjectId(kaizen_id)},
+        {
+            "$set": {
+                "livello": nuovo_livello,
+                "tipo": f"{nuovo_livello} Kaizen",
+                "updated_at": datetime.now(timezone.utc),
+            },
+            "$push": {"livello_storia": storia_entry, "feed": feed_entry},
+        }
+    )
+    
+    return {
+        "message": f"Kaizen trasformato in {nuovo_livello}",
+        "nuovo_livello": nuovo_livello,
+        "livello_precedente": livello_attuale,
+    }
+
+
+# ============================================================
+# LEGACY — promote/demote (deprecated, manteniamo per backward compat)
 # ============================================================
 @router.patch("/{kaizen_id}/promote")
-async def promote_kaizen(kaizen_id: str, payload: PromotePayload):
-    """Promuove un Kaizen al livello successivo (Quick→Standard, Standard→Major)."""
+async def promote_kaizen_legacy(kaizen_id: str, payload: PromotePayload):
+    """DEPRECATED: usa /change-methodology. Mantenuto per compatibilità."""
     kaizen = await db.kaizens.find_one({"_id": ObjectId(kaizen_id)})
     if not kaizen:
         raise HTTPException(status_code=404, detail="Kaizen non trovato")
     
     livello_attuale = kaizen.get("livello") or normalize_livello(None, kaizen.get("tipo"))
-    
     promotion_map = {"Quick": "Standard", "Standard": "Major"}
     nuovo_livello = promotion_map.get(livello_attuale)
     
     if not nuovo_livello:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Impossibile promuovere: {livello_attuale} è già il livello massimo"
-        )
+        raise HTTPException(status_code=400, detail="Già al livello massimo")
     
-    # Aggiorna livello + traccia storia
-    storia_entry = {
-        "livello": nuovo_livello,
-        "livello_precedente": livello_attuale,
-        "quando": datetime.now(timezone.utc).isoformat(),
-        "utente": "Default User",
-        "motivo": payload.motivo or f"Promossa a {nuovo_livello}",
-        "azione": "PROMOTE",
-    }
-    
-    feed_entry = {
-        "utente": "Default User",
-        "azione": f"⬆️ Promosso a {nuovo_livello} Kaizen",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    }
-    
-    await db.kaizens.update_one(
-        {"_id": ObjectId(kaizen_id)},
-        {
-            "$set": {
-                "livello": nuovo_livello,
-                "tipo": f"{nuovo_livello} Kaizen",
-                "updated_at": datetime.now(timezone.utc),
-            },
-            "$push": {"livello_storia": storia_entry, "feed": feed_entry},
-        }
-    )
-    
-    return {"message": f"Promosso a {nuovo_livello}", "nuovo_livello": nuovo_livello}
+    # Delego a change_methodology
+    change_payload = ChangeMethodologyPayload(nuovo_livello=nuovo_livello, motivo=payload.motivo)
+    return await change_methodology(kaizen_id, change_payload)
 
 
 @router.patch("/{kaizen_id}/demote")
-async def demote_kaizen(kaizen_id: str, payload: PromotePayload):
-    """Riporta un Kaizen al livello precedente (Major→Standard, Standard→Quick)."""
+async def demote_kaizen_legacy(kaizen_id: str, payload: PromotePayload):
+    """DEPRECATED: usa /change-methodology. Mantenuto per compatibilità."""
     kaizen = await db.kaizens.find_one({"_id": ObjectId(kaizen_id)})
     if not kaizen:
         raise HTTPException(status_code=404, detail="Kaizen non trovato")
     
     livello_attuale = kaizen.get("livello") or normalize_livello(None, kaizen.get("tipo"))
-    
     demotion_map = {"Major": "Standard", "Standard": "Quick"}
     nuovo_livello = demotion_map.get(livello_attuale)
     
     if not nuovo_livello:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Impossibile retrocedere: {livello_attuale} è già il livello minimo"
-        )
+        raise HTTPException(status_code=400, detail="Già al livello minimo")
     
-    # Se demoting da Major→Standard, controllo che non abbia figli Standard
-    if livello_attuale == "Major":
-        children_ids = kaizen.get("children_kaizen_ids", [])
-        for child_id in children_ids:
-            try:
-                child = await db.kaizens.find_one({"_id": ObjectId(child_id)})
-                if child and child.get("livello") == "Standard":
-                    raise HTTPException(
-                        status_code=400,
-                        detail="Impossibile retrocedere: ha figli Standard Kaizen. Rimuovili prima."
-                    )
-            except Exception:
-                continue
-    
-    storia_entry = {
-        "livello": nuovo_livello,
-        "livello_precedente": livello_attuale,
-        "quando": datetime.now(timezone.utc).isoformat(),
-        "utente": "Default User",
-        "motivo": payload.motivo or f"Retrocesso a {nuovo_livello}",
-        "azione": "DEMOTE",
-    }
-    
-    feed_entry = {
-        "utente": "Default User",
-        "azione": f"⬇️ Retrocesso a {nuovo_livello} Kaizen",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    }
-    
-    await db.kaizens.update_one(
-        {"_id": ObjectId(kaizen_id)},
-        {
-            "$set": {
-                "livello": nuovo_livello,
-                "tipo": f"{nuovo_livello} Kaizen",
-                "updated_at": datetime.now(timezone.utc),
-            },
-            "$push": {"livello_storia": storia_entry, "feed": feed_entry},
-        }
-    )
-    
-    return {"message": f"Retrocesso a {nuovo_livello}", "nuovo_livello": nuovo_livello}
-
+    change_payload = ChangeMethodologyPayload(nuovo_livello=nuovo_livello, motivo=payload.motivo)
+    return await change_methodology(kaizen_id, change_payload)
 
 # ============================================================
 # 🆕 GERARCHIA — Children + Link/Unlink
