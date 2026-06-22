@@ -156,8 +156,8 @@ async def create_pillar(pillar: PillarCreate):
         "step4_implementation": empty_step() | {"snapshot_at": None},
         "step5_close_the_loop": empty_step() | {"bridge_data": [], "lezioni_apprese": ""},
         
+        "gantt_items": [],
         "maturity_grid": {},
-        "attivo": True,
         
         "created_at": now,
         "updated_at": now,
