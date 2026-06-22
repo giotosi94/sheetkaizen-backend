@@ -89,9 +89,15 @@ class KaizenUpdate(BaseModel):
     cost_benefit: Optional[Dict[str, Any]] = None
 
 
-# 🆕 Payload per promote/demote
+# 🆕 Payload per cambio metodologia (Quick ↔ Standard ↔ Major)
+class ChangeMethodologyPayload(BaseModel):
+    nuovo_livello: str  # "Quick", "Standard", o "Major"
+    motivo: Optional[str] = None  # opzionale ma consigliato
+
+
+# 🆕 Payload legacy per promote/demote (manteniamo per backward compat)
 class PromotePayload(BaseModel):
-    motivo: Optional[str] = None  # perché si sta promuovendo/demotando
+    motivo: Optional[str] = None
 
 
 # 🆕 Payload per linkare un Kaizen figlio
