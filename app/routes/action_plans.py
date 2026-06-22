@@ -6,8 +6,10 @@ from app.models.action_plan import (
 from bson import ObjectId
 from datetime import datetime, timezone
 from typing import Optional
+from pydantic import BaseModel
 import re
 import uuid
+
 
 router = APIRouter()
 
@@ -571,3 +573,143 @@ async def delete_action_plan(plan_id: str):
         {"$set": {"is_active": False, "updated_at": datetime.now(timezone.utc)}},
     )
     return {"message": "Action Plan disattivato"}
+
+# ============================================================
+# 🆕 KAIZEN LINK — endpoint dedicati per integrazione Kaizen polimorfico
+# ============================================================
+@router.get("/by-kaizen/{kaizen_id}")
+async def get_action_plans_by_kaizen(kaizen_id: str):
+    """Restituisce tutti gli Action Plan collegati a uno specifico Kaizen.
+    Mirror dell'endpoint /kaizens/{id}/action-plans ma con stessa logica polimorfica.
+    """
+    plans = []
+    
+    # 1. AP con campo legacy kaizen_id
+    cursor = db.action_plans.find({
+        "kaizen_id": kaizen_id,
+        "is_active": {"$ne": False}
+    }).sort("created_at", -1)
+    async for p in cursor:
+        plans.append(enrich_plan(p))
+    
+    # 2. AP con link polimorfico
+    cursor = db.action_plans.find({
+        "links": {"$elemMatch": {"entity_type": "kaizen", "entity_id": kaizen_id}},
+        "is_active": {"$ne": False}
+    }).sort("created_at", -1)
+    async for p in cursor:
+        p_id = str(p["_id"])
+        # Evita duplicati se l'AP è collegato in entrambi i modi
+        if not any(existing["_id"] == p_id for existing in plans):
+            plans.append(enrich_plan(p))
+    
+    return plans
+
+
+class LinkKaizenPayload(BaseModel):
+    kaizen_id: str
+    kaizen_numero: Optional[str] = None  # Es: "QK-0001" — per visualizzazione
+
+
+@router.post("/{plan_id}/link-kaizen")
+async def link_kaizen_to_ap(plan_id: str, payload: LinkKaizenPayload):
+    """Collega un Action Plan a un Kaizen.
+    Aggiorna sia il campo legacy `kaizen_id` sia i `links` polimorfici per coerenza.
+    """
+    # Verifica che AP e Kaizen esistano
+    ap = await db.action_plans.find_one({"_id": ObjectId(plan_id)})
+    if not ap:
+        raise HTTPException(status_code=404, detail="Action Plan non trovato")
+    
+    try:
+        kaizen = await db.kaizens.find_one({"_id": ObjectId(payload.kaizen_id)})
+    except Exception:
+        raise HTTPException(status_code=400, detail="Kaizen ID non valido")
+    
+    if not kaizen:
+        raise HTTPException(status_code=404, detail="Kaizen non trovato")
+    
+    # Determina il "numero" del Kaizen per la visualizzazione
+    kaizen_numero = payload.kaizen_numero or kaizen.get("numero") or payload.kaizen_id[:8]
+    
+    # Crea il link polimorfico
+    new_link = {
+        "entity_type": "kaizen",
+        "entity_id": payload.kaizen_id,
+        "entity_label": kaizen_numero,
+        "link_type": "related_to",
+    }
+    
+    # Aggiungi il link (evita duplicati con $addToSet)
+    # Aggiorna sia legacy kaizen_id sia polymorphic links
+    feed_entry = {
+        "id": str(uuid.uuid4()),
+        "utente": "Default User",
+        "azione": f"🔗 Collegato a Kaizen {kaizen_numero}",
+        "tipo_evento": "link_kaizen",
+        "timestamp": datetime.now(timezone.utc),
+    }
+    
+    result = await db.action_plans.update_one(
+        {"_id": ObjectId(plan_id)},
+        {
+            "$set": {
+                "kaizen_id": payload.kaizen_id,
+                "updated_at": datetime.now(timezone.utc),
+            },
+            "$addToSet": {"links": new_link},
+            "$push": {"feed": feed_entry},
+        }
+    )
+    
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="AP non trovato")
+    
+    return {
+        "message": f"Action Plan collegato al Kaizen {kaizen_numero}",
+        "kaizen_id": payload.kaizen_id,
+        "kaizen_numero": kaizen_numero,
+    }
+
+
+@router.delete("/{plan_id}/link-kaizen/{kaizen_id}")
+async def unlink_kaizen_from_ap(plan_id: str, kaizen_id: str):
+    """Scollega un Action Plan da un Kaizen.
+    Rimuove sia il riferimento legacy che il link polimorfico.
+    """
+    ap = await db.action_plans.find_one({"_id": ObjectId(plan_id)})
+    if not ap:
+        raise HTTPException(status_code=404, detail="Action Plan non trovato")
+    
+    # Estraggo il numero per il feed
+    kaizen_numero = "Kaizen"
+    for link in ap.get("links", []):
+        if link.get("entity_type") == "kaizen" and link.get("entity_id") == kaizen_id:
+            kaizen_numero = link.get("entity_label", "Kaizen")
+            break
+    
+    feed_entry = {
+        "id": str(uuid.uuid4()),
+        "utente": "Default User",
+        "azione": f"🔓 Scollegato da Kaizen {kaizen_numero}",
+        "tipo_evento": "unlink_kaizen",
+        "timestamp": datetime.now(timezone.utc),
+    }
+    
+    # Aggiornamento: pulisce kaizen_id se era quello + rimuove dal links
+    update_ops = {
+        "$pull": {"links": {"entity_type": "kaizen", "entity_id": kaizen_id}},
+        "$push": {"feed": feed_entry},
+        "$set": {"updated_at": datetime.now(timezone.utc)},
+    }
+    
+    # Se il campo legacy kaizen_id corrisponde, lo svuoto
+    if ap.get("kaizen_id") == kaizen_id:
+        update_ops["$set"]["kaizen_id"] = None
+    
+    await db.action_plans.update_one(
+        {"_id": ObjectId(plan_id)},
+        update_ops
+    )
+    
+    return {"message": f"Action Plan scollegato da {kaizen_numero}"}
