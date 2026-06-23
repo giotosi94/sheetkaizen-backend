@@ -58,9 +58,9 @@ class ActionPlanCreate(BaseModel):
     descrizione: Optional[str] = ""
     
     # === CLASSIFICAZIONE (configurabili da Settings) ===
-    tipo: Optional[TIPO_AP] = "Task"
-    priorita: Optional[PRIORITA] = "Medium"
-    stato: Optional[STATO] = "Da Valutare"
+    tipo: Optional[TIPO_AP] = None
+    priorita: Optional[PRIORITA] = None
+    stato: Optional[STATO] = None
     categoria_perdita: Optional[str] = None
     
     # === HARD-CODED ===
