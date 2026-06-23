@@ -39,6 +39,30 @@ def extract_mentions_and_tags(text: str):
     return list(set(mentions)), list(set(tags))
 
 
+async def resolve_pillar_from_parent(parent_type: str, parent_id: str) -> Optional[str]:
+    """
+    Risolve il pillar_id automaticamente in base al parent.
+    - parent_type=pillar → pillar_id = parent_id
+    - parent_type=kaizen → cerca il pillar_id del Kaizen
+    - altri → None
+    """
+    if not parent_type or not parent_id:
+        return None
+    
+    if parent_type == "pillar":
+        return parent_id
+    
+    if parent_type == "kaizen":
+        try:
+            kaizen = await db.kaizens.find_one({"_id": ObjectId(parent_id)})
+            if kaizen:
+                return kaizen.get("pillar_id")
+        except Exception:
+            pass
+    
+    return None
+
+
 def calcola_health_score(plan: dict) -> int:
     """Calcola un health score 0-100 basato su:
     - Ritardo (-30 se in ritardo)
@@ -125,7 +149,6 @@ def enrich_plan(plan: dict) -> dict:
     plan["_id"] = str(plan["_id"])
     plan["stato_visuale"] = calcola_stato_visuale(plan)
     plan["health_score"] = calcola_health_score(plan)
-    # Converti ObjectId in stringhe nei sub-doc
     if "parent_id" in plan and plan["parent_id"]:
         plan["parent_id"] = str(plan["parent_id"])
     return plan
@@ -136,12 +159,28 @@ def enrich_plan(plan: dict) -> dict:
 # ============================================================
 @router.get("/")
 async def get_action_plans(
+    # Filtri classificazione
     stato: Optional[str] = Query(None),
     tipo: Optional[str] = Query(None),
     priorita: Optional[str] = Query(None),
     categoria: Optional[str] = Query(None),
+    categoria_perdita: Optional[str] = Query(None),
+    quinta_m: Optional[str] = Query(None),
+    
+    # Filtri assegnazione
     responsabile: Optional[str] = Query(None),
+    
+    # Filtri struttura aziendale
     reparto: Optional[str] = Query(None),
+    linea: Optional[str] = Query(None),
+    macchina: Optional[str] = Query(None),
+    
+    # Filtri parent / contesto
+    parent_type: Optional[str] = Query(None),
+    pillar_id: Optional[str] = Query(None),
+    dashboard_id: Optional[str] = Query(None),
+    
+    # Altri
     tag: Optional[str] = Query(None),
     parent_id: Optional[str] = Query(None),
     linked_to_type: Optional[str] = Query(None),
@@ -152,6 +191,7 @@ async def get_action_plans(
     """Lista action plans con filtri trasversali."""
     query = {"is_active": {"$ne": False}}
     
+    # Classificazione
     if stato:
         query["stato"] = stato
     if tipo:
@@ -160,10 +200,31 @@ async def get_action_plans(
         query["priorita"] = priorita
     if categoria:
         query["categoria"] = categoria
+    if categoria_perdita:
+        query["categoria_perdita"] = categoria_perdita
+    if quinta_m:
+        query["quinta_m"] = quinta_m
+    
+    # Assegnazione
     if responsabile:
         query["responsabile"] = responsabile
+    
+    # Struttura aziendale
     if reparto:
         query["reparto"] = reparto
+    if linea:
+        query["linea"] = linea
+    if macchina:
+        query["macchina"] = macchina
+    
+    # Contesto / parent
+    if parent_type:
+        query["parent_type"] = parent_type
+    if pillar_id:
+        query["pillar_id"] = pillar_id
+    if dashboard_id:
+        query["dashboard_id"] = dashboard_id
+    
     if tag:
         query["tags"] = tag
     if parent_id:
@@ -231,13 +292,11 @@ async def get_stats(
     result = await db.action_plans.aggregate(pipeline).to_list(1)
     data = result[0] if result else {}
     
-    # Format
     per_stato = {item["_id"]: item["count"] for item in data.get("per_stato", []) if item["_id"]}
     per_priorita = {item["_id"]: item["count"] for item in data.get("per_priorita", []) if item["_id"]}
     per_tipo = {item["_id"]: item["count"] for item in data.get("per_tipo", []) if item["_id"]}
     totale = data.get("totale", [{}])[0].get("count", 0) if data.get("totale") else 0
     
-    # Overdue count
     overdue_count = await db.action_plans.count_documents({
         **match,
         "stato": {"$nin": ["Done", "Cancelled"]},
@@ -292,14 +351,41 @@ async def create_action_plan(plan: ActionPlanCreate):
         item_dict["id"] = str(uuid.uuid4())
         checklist.append(item_dict)
     
+    # 🆕 Backward compat: se passato kaizen_id legacy ma non parent_type, lo deriviamo
+    derived_parent_type = plan.parent_type or "standalone"
+    derived_parent_id = plan.parent_id
+    if plan.kaizen_id and not plan.parent_id:
+        derived_parent_type = "kaizen"
+        derived_parent_id = plan.kaizen_id
+    
+    # 🆕 Auto-risolvi pillar_id dal parent (se non già passato)
+    auto_pillar_id = plan.pillar_id
+    if not auto_pillar_id and derived_parent_type and derived_parent_id:
+        auto_pillar_id = await resolve_pillar_from_parent(derived_parent_type, derived_parent_id)
+    
     doc = {
         "numero": numero,
         "titolo": plan.titolo,
         "descrizione": plan.descrizione or "",
+        
+        # Classificazione
         "tipo": plan.tipo or "Task",
         "priorita": plan.priorita or "Medium",
         "stato": plan.stato or "Backlog",
+        "categoria_perdita": plan.categoria_perdita or plan.tipo_perdita,
+        "quinta_m": plan.quinta_m,
+        
+        # 🆕 Contesto polimorfico
+        "parent_type": derived_parent_type,
+        "parent_id": derived_parent_id,
+        "parent_label": plan.parent_label,
+        "pillar_id": auto_pillar_id,
+        "dashboard_id": plan.dashboard_id,
+        
+        # Legacy (mantenuti per backward compat)
         "categoria": plan.categoria,
+        "tipo_perdita": plan.tipo_perdita,
+        "kaizen_id": plan.kaizen_id or (derived_parent_id if derived_parent_type == "kaizen" else None),
         
         "tags": tags,
         "mentions": mentions,
@@ -321,7 +407,10 @@ async def create_action_plan(plan: ActionPlanCreate):
         "avanzamento": 0,
         "checklist": checklist,
         
-        "parent_id": plan.parent_id,
+        # ⚠️ NOTA: parent_id e children_ids per SUBTASK (gerarchia tra AP)
+        # Sono diversi dal parent_type/parent_id del contesto polimorfico.
+        # Manteniamo i subtask "parent" → "children" tramite il campo legacy parent_id.
+        # In futuro andrà rinominato in subtask_parent_id per evitare confusione.
         "children_ids": [],
         
         "links": [link.dict() for link in plan.links],
@@ -347,7 +436,8 @@ async def create_action_plan(plan: ActionPlanCreate):
     result = await db.action_plans.insert_one(doc)
     
     # Aggiorna parent (se subtask)
-    if plan.parent_id:
+    # Solo se il parent_id NON è un Kaizen ma un altro Action Plan
+    if plan.parent_id and derived_parent_type == "standalone":
         try:
             await db.action_plans.update_one(
                 {"_id": ObjectId(plan.parent_id)},
@@ -358,9 +448,7 @@ async def create_action_plan(plan: ActionPlanCreate):
     
     created = await db.action_plans.find_one({"_id": result.inserted_id})
     return enrich_plan(created)
-
-
-# ============================================================
+    # ============================================================
 # UPDATE
 # ============================================================
 @router.put("/{plan_id}")
@@ -370,6 +458,19 @@ async def update_action_plan(plan_id: str, update: ActionPlanUpdate):
         raise HTTPException(status_code=404, detail="Action Plan non trovato")
     
     update_data = {k: v for k, v in update.dict().items() if v is not None}
+    
+    # 🆕 Se è cambiato il parent, ricalcola pillar_id
+    if "parent_type" in update_data or "parent_id" in update_data:
+        new_parent_type = update_data.get("parent_type", existing.get("parent_type"))
+        new_parent_id = update_data.get("parent_id", existing.get("parent_id"))
+        if new_parent_type and new_parent_id and "pillar_id" not in update_data:
+            resolved = await resolve_pillar_from_parent(new_parent_type, new_parent_id)
+            if resolved:
+                update_data["pillar_id"] = resolved
+    
+    # 🆕 Backward compat: categoria_perdita ↔ tipo_perdita
+    if "tipo_perdita" in update_data and "categoria_perdita" not in update_data:
+        update_data["categoria_perdita"] = update_data["tipo_perdita"]
     
     # Re-estrai mentions/tags se descrizione cambiata
     if "descrizione" in update_data:
@@ -574,19 +675,21 @@ async def delete_action_plan(plan_id: str):
     )
     return {"message": "Action Plan disattivato"}
 
+
 # ============================================================
 # 🆕 KAIZEN LINK — endpoint dedicati per integrazione Kaizen polimorfico
 # ============================================================
 @router.get("/by-kaizen/{kaizen_id}")
 async def get_action_plans_by_kaizen(kaizen_id: str):
-    """Restituisce tutti gli Action Plan collegati a uno specifico Kaizen.
-    Mirror dell'endpoint /kaizens/{id}/action-plans ma con stessa logica polimorfica.
-    """
+    """Restituisce tutti gli Action Plan collegati a uno specifico Kaizen."""
     plans = []
     
-    # 1. AP con campo legacy kaizen_id
+    # 1. AP con campo legacy kaizen_id O parent_type=kaizen
     cursor = db.action_plans.find({
-        "kaizen_id": kaizen_id,
+        "$or": [
+            {"kaizen_id": kaizen_id},
+            {"parent_type": "kaizen", "parent_id": kaizen_id},
+        ],
         "is_active": {"$ne": False}
     }).sort("created_at", -1)
     async for p in cursor:
@@ -599,7 +702,6 @@ async def get_action_plans_by_kaizen(kaizen_id: str):
     }).sort("created_at", -1)
     async for p in cursor:
         p_id = str(p["_id"])
-        # Evita duplicati se l'AP è collegato in entrambi i modi
         if not any(existing["_id"] == p_id for existing in plans):
             plans.append(enrich_plan(p))
     
@@ -608,15 +710,14 @@ async def get_action_plans_by_kaizen(kaizen_id: str):
 
 class LinkKaizenPayload(BaseModel):
     kaizen_id: str
-    kaizen_numero: Optional[str] = None  # Es: "QK-0001" — per visualizzazione
+    kaizen_numero: Optional[str] = None
 
 
 @router.post("/{plan_id}/link-kaizen")
 async def link_kaizen_to_ap(plan_id: str, payload: LinkKaizenPayload):
     """Collega un Action Plan a un Kaizen.
-    Aggiorna sia il campo legacy `kaizen_id` sia i `links` polimorfici per coerenza.
+    Aggiorna parent_type/parent_id, legacy kaizen_id e links polimorfici.
     """
-    # Verifica che AP e Kaizen esistano
     ap = await db.action_plans.find_one({"_id": ObjectId(plan_id)})
     if not ap:
         raise HTTPException(status_code=404, detail="Action Plan non trovato")
@@ -629,10 +730,9 @@ async def link_kaizen_to_ap(plan_id: str, payload: LinkKaizenPayload):
     if not kaizen:
         raise HTTPException(status_code=404, detail="Kaizen non trovato")
     
-    # Determina il "numero" del Kaizen per la visualizzazione
     kaizen_numero = payload.kaizen_numero or kaizen.get("numero") or payload.kaizen_id[:8]
+    pillar_id_from_kaizen = kaizen.get("pillar_id")
     
-    # Crea il link polimorfico
     new_link = {
         "entity_type": "kaizen",
         "entity_id": payload.kaizen_id,
@@ -640,8 +740,6 @@ async def link_kaizen_to_ap(plan_id: str, payload: LinkKaizenPayload):
         "link_type": "related_to",
     }
     
-    # Aggiungi il link (evita duplicati con $addToSet)
-    # Aggiorna sia legacy kaizen_id sia polymorphic links
     feed_entry = {
         "id": str(uuid.uuid4()),
         "utente": "Default User",
@@ -650,13 +748,21 @@ async def link_kaizen_to_ap(plan_id: str, payload: LinkKaizenPayload):
         "timestamp": datetime.now(timezone.utc),
     }
     
+    # 🆕 Aggiorna anche parent_type/parent_id + pillar_id transitivo
+    set_data = {
+        "kaizen_id": payload.kaizen_id,
+        "parent_type": "kaizen",
+        "parent_id": payload.kaizen_id,
+        "parent_label": kaizen_numero,
+        "updated_at": datetime.now(timezone.utc),
+    }
+    if pillar_id_from_kaizen:
+        set_data["pillar_id"] = pillar_id_from_kaizen
+    
     result = await db.action_plans.update_one(
         {"_id": ObjectId(plan_id)},
         {
-            "$set": {
-                "kaizen_id": payload.kaizen_id,
-                "updated_at": datetime.now(timezone.utc),
-            },
+            "$set": set_data,
             "$addToSet": {"links": new_link},
             "$push": {"feed": feed_entry},
         }
@@ -669,19 +775,17 @@ async def link_kaizen_to_ap(plan_id: str, payload: LinkKaizenPayload):
         "message": f"Action Plan collegato al Kaizen {kaizen_numero}",
         "kaizen_id": payload.kaizen_id,
         "kaizen_numero": kaizen_numero,
+        "pillar_id": pillar_id_from_kaizen,
     }
 
 
 @router.delete("/{plan_id}/link-kaizen/{kaizen_id}")
 async def unlink_kaizen_from_ap(plan_id: str, kaizen_id: str):
-    """Scollega un Action Plan da un Kaizen.
-    Rimuove sia il riferimento legacy che il link polimorfico.
-    """
+    """Scollega un Action Plan da un Kaizen."""
     ap = await db.action_plans.find_one({"_id": ObjectId(plan_id)})
     if not ap:
         raise HTTPException(status_code=404, detail="Action Plan non trovato")
     
-    # Estraggo il numero per il feed
     kaizen_numero = "Kaizen"
     for link in ap.get("links", []):
         if link.get("entity_type") == "kaizen" and link.get("entity_id") == kaizen_id:
@@ -696,14 +800,19 @@ async def unlink_kaizen_from_ap(plan_id: str, kaizen_id: str):
         "timestamp": datetime.now(timezone.utc),
     }
     
-    # Aggiornamento: pulisce kaizen_id se era quello + rimuove dal links
     update_ops = {
         "$pull": {"links": {"entity_type": "kaizen", "entity_id": kaizen_id}},
         "$push": {"feed": feed_entry},
         "$set": {"updated_at": datetime.now(timezone.utc)},
     }
     
-    # Se il campo legacy kaizen_id corrisponde, lo svuoto
+    # 🆕 Pulisci parent_type/parent_id/pillar_id se erano legati a questo Kaizen
+    if ap.get("parent_type") == "kaizen" and ap.get("parent_id") == kaizen_id:
+        update_ops["$set"]["parent_type"] = "standalone"
+        update_ops["$set"]["parent_id"] = None
+        update_ops["$set"]["parent_label"] = None
+        update_ops["$set"]["pillar_id"] = None
+    
     if ap.get("kaizen_id") == kaizen_id:
         update_ops["$set"]["kaizen_id"] = None
     
