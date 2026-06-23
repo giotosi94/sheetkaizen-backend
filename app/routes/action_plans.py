@@ -421,6 +421,11 @@ async def create_action_plan(plan: ActionPlanCreate):
         "cancelled_at": None,
         "cancelled_by": None,
         
+        # 🆕 Gantt fields
+        "dependencies": plan.dependencies or [],
+        "gantt_progress": plan.gantt_progress or 0,
+        "gantt_milestone": plan.gantt_milestone or False,
+        
         "is_active": True,
         "created_at": datetime.now(timezone.utc),
         "updated_at": datetime.now(timezone.utc),
