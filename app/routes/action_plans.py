@@ -40,12 +40,7 @@ def extract_mentions_and_tags(text: str):
 
 
 async def resolve_pillar_from_parent(parent_type: str, parent_id: str) -> Optional[str]:
-    """
-    Risolve il pillar_id automaticamente in base al parent.
-    - parent_type=pillar → pillar_id = parent_id
-    - parent_type=kaizen → cerca il pillar_id del Kaizen
-    - altri → None
-    """
+    """Risolve il pillar_id automaticamente in base al parent."""
     if not parent_type or not parent_id:
         return None
     
@@ -64,20 +59,11 @@ async def resolve_pillar_from_parent(parent_type: str, parent_id: str) -> Option
 
 
 def calcola_health_score(plan: dict) -> int:
-    """Calcola un health score 0-100 basato su:
-    - Ritardo (-30 se in ritardo)
-    - Senza assignee (-20)
-    - Senza scadenza (-10)
-    - Bloccato (-30)
-    - Età senza update (-10)
-    - Avanzamento alto (+10)
-    """
     score = 100
     
-    if plan.get("stato") in ["Done", "Cancelled"]:
+    if plan.get("stato") in ["Done", "Cancelled"] or plan.get("is_cancelled"):
         return 100
     
-    # Ritardo
     scadenza = plan.get("data_scadenza")
     if scadenza:
         try:
@@ -98,7 +84,6 @@ def calcola_health_score(plan: dict) -> int:
     if plan.get("is_blocked"):
         score -= 30
     
-    # Età senza update
     updated = plan.get("updated_at")
     if updated:
         try:
@@ -112,7 +97,6 @@ def calcola_health_score(plan: dict) -> int:
         except Exception:
             pass
     
-    # Bonus avanzamento
     if plan.get("avanzamento", 0) >= 75:
         score += 10
     
@@ -120,7 +104,11 @@ def calcola_health_score(plan: dict) -> int:
 
 
 def calcola_stato_visuale(plan: dict) -> str:
-    """Calcola stato visuale con flag dinamici (In Ritardo / In Scadenza)."""
+    """Calcola stato visuale con flag dinamici (In Ritardo / In Scadenza / Annullato)."""
+    # 🆕 Annullato ha priorità su tutto
+    if plan.get("is_cancelled"):
+        return "Annullato"
+    
     stato = plan.get("stato", "Backlog")
     if stato in ["Done", "Cancelled"]:
         return stato
@@ -180,6 +168,10 @@ async def get_action_plans(
     pillar_id: Optional[str] = Query(None),
     dashboard_id: Optional[str] = Query(None),
     
+    # 🆕 Filtro cancellati
+    include_cancelled: Optional[bool] = Query(False),
+    only_cancelled: Optional[bool] = Query(False),
+    
     # Altri
     tag: Optional[str] = Query(None),
     parent_id: Optional[str] = Query(None),
@@ -190,6 +182,12 @@ async def get_action_plans(
 ):
     """Lista action plans con filtri trasversali."""
     query = {"is_active": {"$ne": False}}
+    
+    # 🆕 Gestione cancellati
+    if only_cancelled:
+        query["is_cancelled"] = True
+    elif not include_cancelled:
+        query["is_cancelled"] = {"$ne": True}
     
     # Classificazione
     if stato:
@@ -230,13 +228,11 @@ async def get_action_plans(
     if parent_id:
         query["parent_id"] = parent_id
     
-    # Filtro polymorphic link
     if linked_to_type and linked_to_id:
         query["links"] = {
             "$elemMatch": {"entity_type": linked_to_type, "entity_id": linked_to_id}
         }
     
-    # Overdue dinamico
     if overdue:
         query["data_scadenza"] = {"$lt": datetime.now(timezone.utc)}
         query["stato"] = {"$nin": ["Done", "Cancelled"]}
@@ -265,7 +261,7 @@ async def get_stats(
     responsabile: Optional[str] = Query(None),
 ):
     """Statistiche aggregate per dashboard / widget."""
-    match = {"is_active": {"$ne": False}}
+    match = {"is_active": {"$ne": False}, "is_cancelled": {"$ne": True}}
     if reparto:
         match["reparto"] = reparto
     if responsabile:
@@ -274,18 +270,10 @@ async def get_stats(
     pipeline = [
         {"$match": match},
         {"$facet": {
-            "per_stato": [
-                {"$group": {"_id": "$stato", "count": {"$sum": 1}}},
-            ],
-            "per_priorita": [
-                {"$group": {"_id": "$priorita", "count": {"$sum": 1}}},
-            ],
-            "per_tipo": [
-                {"$group": {"_id": "$tipo", "count": {"$sum": 1}}},
-            ],
-            "totale": [
-                {"$count": "count"}
-            ],
+            "per_stato": [{"$group": {"_id": "$stato", "count": {"$sum": 1}}}],
+            "per_priorita": [{"$group": {"_id": "$priorita", "count": {"$sum": 1}}}],
+            "per_tipo": [{"$group": {"_id": "$tipo", "count": {"$sum": 1}}}],
+            "totale": [{"$count": "count"}],
         }}
     ]
     
@@ -303,12 +291,21 @@ async def get_stats(
         "data_scadenza": {"$lt": datetime.now(timezone.utc)},
     })
     
+    # 🆕 Conteggio annullati
+    cancelled_count = await db.action_plans.count_documents({
+        "is_active": {"$ne": False},
+        "is_cancelled": True,
+        **({"reparto": reparto} if reparto else {}),
+        **({"responsabile": responsabile} if responsabile else {}),
+    })
+    
     return {
         "totale": totale,
         "per_stato": per_stato,
         "per_priorita": per_priorita,
         "per_tipo": per_tipo,
         "overdue": overdue_count,
+        "cancelled": cancelled_count,  # 🆕
     }
 
 
@@ -339,26 +336,22 @@ async def get_action_plan(plan_id: str, include_children: bool = False):
 async def create_action_plan(plan: ActionPlanCreate):
     numero = await get_next_numero()
     
-    # Auto-estrai mentions e tags dalla descrizione
     auto_mentions, auto_tags = extract_mentions_and_tags(plan.descrizione or "")
     mentions = list(set(plan.mentions + auto_mentions))
     tags = list(set(plan.tags + auto_tags))
     
-    # Checklist con id
     checklist = []
     for item in plan.checklist:
         item_dict = item.dict() if hasattr(item, 'dict') else item
         item_dict["id"] = str(uuid.uuid4())
         checklist.append(item_dict)
     
-    # 🆕 Backward compat: se passato kaizen_id legacy ma non parent_type, lo deriviamo
     derived_parent_type = plan.parent_type or "standalone"
     derived_parent_id = plan.parent_id
     if plan.kaizen_id and not plan.parent_id:
         derived_parent_type = "kaizen"
         derived_parent_id = plan.kaizen_id
     
-    # 🆕 Auto-risolvi pillar_id dal parent (se non già passato)
     auto_pillar_id = plan.pillar_id
     if not auto_pillar_id and derived_parent_type and derived_parent_id:
         auto_pillar_id = await resolve_pillar_from_parent(derived_parent_type, derived_parent_id)
@@ -368,21 +361,19 @@ async def create_action_plan(plan: ActionPlanCreate):
         "titolo": plan.titolo,
         "descrizione": plan.descrizione or "",
         
-        # Classificazione
         "tipo": plan.tipo or "Task",
         "priorita": plan.priorita or "Medium",
-        "stato": plan.stato or "Backlog",
+        "stato": plan.stato or "Da Valutare",
         "categoria_perdita": plan.categoria_perdita or plan.tipo_perdita,
         "quinta_m": plan.quinta_m,
         
-        # 🆕 Contesto polimorfico
         "parent_type": derived_parent_type,
         "parent_id": derived_parent_id,
         "parent_label": plan.parent_label,
         "pillar_id": auto_pillar_id,
         "dashboard_id": plan.dashboard_id,
         
-        # Legacy (mantenuti per backward compat)
+        # Legacy
         "categoria": plan.categoria,
         "tipo_perdita": plan.tipo_perdita,
         "kaizen_id": plan.kaizen_id or (derived_parent_id if derived_parent_type == "kaizen" else None),
@@ -407,10 +398,6 @@ async def create_action_plan(plan: ActionPlanCreate):
         "avanzamento": 0,
         "checklist": checklist,
         
-        # ⚠️ NOTA: parent_id e children_ids per SUBTASK (gerarchia tra AP)
-        # Sono diversi dal parent_type/parent_id del contesto polimorfico.
-        # Manteniamo i subtask "parent" → "children" tramite il campo legacy parent_id.
-        # In futuro andrà rinominato in subtask_parent_id per evitare confusione.
         "children_ids": [],
         
         "links": [link.dict() for link in plan.links],
@@ -428,6 +415,12 @@ async def create_action_plan(plan: ActionPlanCreate):
         "is_blocked": False,
         "blocking_reason": None,
         
+        # 🆕 Stato cancellazione (default attivo)
+        "is_cancelled": False,
+        "cancelled_reason": None,
+        "cancelled_at": None,
+        "cancelled_by": None,
+        
         "is_active": True,
         "created_at": datetime.now(timezone.utc),
         "updated_at": datetime.now(timezone.utc),
@@ -435,8 +428,6 @@ async def create_action_plan(plan: ActionPlanCreate):
     
     result = await db.action_plans.insert_one(doc)
     
-    # Aggiorna parent (se subtask)
-    # Solo se il parent_id NON è un Kaizen ma un altro Action Plan
     if plan.parent_id and derived_parent_type == "standalone":
         try:
             await db.action_plans.update_one(
@@ -448,7 +439,9 @@ async def create_action_plan(plan: ActionPlanCreate):
     
     created = await db.action_plans.find_one({"_id": result.inserted_id})
     return enrich_plan(created)
-    # ============================================================
+
+
+# ============================================================
 # UPDATE
 # ============================================================
 @router.put("/{plan_id}")
@@ -459,7 +452,6 @@ async def update_action_plan(plan_id: str, update: ActionPlanUpdate):
     
     update_data = {k: v for k, v in update.dict().items() if v is not None}
     
-    # 🆕 Se è cambiato il parent, ricalcola pillar_id
     if "parent_type" in update_data or "parent_id" in update_data:
         new_parent_type = update_data.get("parent_type", existing.get("parent_type"))
         new_parent_id = update_data.get("parent_id", existing.get("parent_id"))
@@ -468,11 +460,9 @@ async def update_action_plan(plan_id: str, update: ActionPlanUpdate):
             if resolved:
                 update_data["pillar_id"] = resolved
     
-    # 🆕 Backward compat: categoria_perdita ↔ tipo_perdita
     if "tipo_perdita" in update_data and "categoria_perdita" not in update_data:
         update_data["categoria_perdita"] = update_data["tipo_perdita"]
     
-    # Re-estrai mentions/tags se descrizione cambiata
     if "descrizione" in update_data:
         auto_mentions, auto_tags = extract_mentions_and_tags(update_data["descrizione"])
         existing_mentions = update_data.get("mentions") or existing.get("mentions", [])
@@ -482,12 +472,10 @@ async def update_action_plan(plan_id: str, update: ActionPlanUpdate):
     
     update_data["updated_at"] = datetime.now(timezone.utc)
     
-    # Completamento automatico
     if update_data.get("stato") == "Done":
         update_data["data_completamento"] = datetime.now(timezone.utc)
         update_data["avanzamento"] = 100
     
-    # Feed entry
     feed_entry = {
         "id": str(uuid.uuid4()),
         "utente": "Default User",
@@ -677,14 +665,93 @@ async def delete_action_plan(plan_id: str):
 
 
 # ============================================================
-# 🆕 KAIZEN LINK — endpoint dedicati per integrazione Kaizen polimorfico
+# 🆕 CANCELLAZIONE LOGICA (annullamento con motivo)
+# ============================================================
+class CancelPayload(BaseModel):
+    reason: str
+    user: Optional[str] = "Default User"
+
+
+@router.post("/{plan_id}/cancel")
+async def cancel_action_plan(plan_id: str, payload: CancelPayload):
+    """Annulla un Action Plan (logico, non eliminazione fisica).
+    Richiede motivazione obbligatoria. L'AP resta in DB e può essere ripristinato.
+    """
+    ap = await db.action_plans.find_one({"_id": ObjectId(plan_id)})
+    if not ap:
+        raise HTTPException(status_code=404, detail="Action Plan non trovato")
+    
+    if not payload.reason or not payload.reason.strip():
+        raise HTTPException(status_code=400, detail="Motivo annullamento obbligatorio")
+    
+    feed_entry = {
+        "id": str(uuid.uuid4()),
+        "utente": payload.user,
+        "azione": f"🚫 Annullato — Motivo: {payload.reason}",
+        "tipo_evento": "cancel",
+        "timestamp": datetime.now(timezone.utc),
+    }
+    
+    await db.action_plans.update_one(
+        {"_id": ObjectId(plan_id)},
+        {
+            "$set": {
+                "is_cancelled": True,
+                "cancelled_reason": payload.reason.strip(),
+                "cancelled_at": datetime.now(timezone.utc),
+                "cancelled_by": payload.user,
+                "updated_at": datetime.now(timezone.utc),
+            },
+            "$push": {"feed": feed_entry},
+        }
+    )
+    
+    return {"message": "Action Plan annullato", "reason": payload.reason}
+
+
+@router.post("/{plan_id}/restore")
+async def restore_action_plan(plan_id: str, user: Optional[str] = "Default User"):
+    """Ripristina un Action Plan annullato (lo riporta tra gli attivi)."""
+    ap = await db.action_plans.find_one({"_id": ObjectId(plan_id)})
+    if not ap:
+        raise HTTPException(status_code=404, detail="Action Plan non trovato")
+    
+    if not ap.get("is_cancelled"):
+        raise HTTPException(status_code=400, detail="Action Plan non è annullato")
+    
+    feed_entry = {
+        "id": str(uuid.uuid4()),
+        "utente": user,
+        "azione": f"♻️ Ripristinato dall'annullamento",
+        "tipo_evento": "restore",
+        "timestamp": datetime.now(timezone.utc),
+    }
+    
+    await db.action_plans.update_one(
+        {"_id": ObjectId(plan_id)},
+        {
+            "$set": {
+                "is_cancelled": False,
+                "cancelled_reason": None,
+                "cancelled_at": None,
+                "cancelled_by": None,
+                "updated_at": datetime.now(timezone.utc),
+            },
+            "$push": {"feed": feed_entry},
+        }
+    )
+    
+    return {"message": "Action Plan ripristinato"}
+
+
+# ============================================================
+# KAIZEN LINK — endpoint dedicati per integrazione Kaizen polimorfico
 # ============================================================
 @router.get("/by-kaizen/{kaizen_id}")
 async def get_action_plans_by_kaizen(kaizen_id: str):
     """Restituisce tutti gli Action Plan collegati a uno specifico Kaizen."""
     plans = []
     
-    # 1. AP con campo legacy kaizen_id O parent_type=kaizen
     cursor = db.action_plans.find({
         "$or": [
             {"kaizen_id": kaizen_id},
@@ -695,7 +762,6 @@ async def get_action_plans_by_kaizen(kaizen_id: str):
     async for p in cursor:
         plans.append(enrich_plan(p))
     
-    # 2. AP con link polimorfico
     cursor = db.action_plans.find({
         "links": {"$elemMatch": {"entity_type": "kaizen", "entity_id": kaizen_id}},
         "is_active": {"$ne": False}
@@ -715,9 +781,6 @@ class LinkKaizenPayload(BaseModel):
 
 @router.post("/{plan_id}/link-kaizen")
 async def link_kaizen_to_ap(plan_id: str, payload: LinkKaizenPayload):
-    """Collega un Action Plan a un Kaizen.
-    Aggiorna parent_type/parent_id, legacy kaizen_id e links polimorfici.
-    """
     ap = await db.action_plans.find_one({"_id": ObjectId(plan_id)})
     if not ap:
         raise HTTPException(status_code=404, detail="Action Plan non trovato")
@@ -748,7 +811,6 @@ async def link_kaizen_to_ap(plan_id: str, payload: LinkKaizenPayload):
         "timestamp": datetime.now(timezone.utc),
     }
     
-    # 🆕 Aggiorna anche parent_type/parent_id + pillar_id transitivo
     set_data = {
         "kaizen_id": payload.kaizen_id,
         "parent_type": "kaizen",
@@ -781,7 +843,6 @@ async def link_kaizen_to_ap(plan_id: str, payload: LinkKaizenPayload):
 
 @router.delete("/{plan_id}/link-kaizen/{kaizen_id}")
 async def unlink_kaizen_from_ap(plan_id: str, kaizen_id: str):
-    """Scollega un Action Plan da un Kaizen."""
     ap = await db.action_plans.find_one({"_id": ObjectId(plan_id)})
     if not ap:
         raise HTTPException(status_code=404, detail="Action Plan non trovato")
@@ -806,7 +867,6 @@ async def unlink_kaizen_from_ap(plan_id: str, kaizen_id: str):
         "$set": {"updated_at": datetime.now(timezone.utc)},
     }
     
-    # 🆕 Pulisci parent_type/parent_id/pillar_id se erano legati a questo Kaizen
     if ap.get("parent_type") == "kaizen" and ap.get("parent_id") == kaizen_id:
         update_ops["$set"]["parent_type"] = "standalone"
         update_ops["$set"]["parent_id"] = None
@@ -816,9 +876,14 @@ async def unlink_kaizen_from_ap(plan_id: str, kaizen_id: str):
     if ap.get("kaizen_id") == kaizen_id:
         update_ops["$set"]["kaizen_id"] = None
     
+    update_ops_clean = {}
+    for op_key, op_val in update_ops.items():
+        if op_val:
+            update_ops_clean[op_key] = op_val
+    
     await db.action_plans.update_one(
         {"_id": ObjectId(plan_id)},
-        update_ops
+        update_ops_clean
     )
     
     return {"message": f"Action Plan scollegato da {kaizen_numero}"}
