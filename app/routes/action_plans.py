@@ -167,6 +167,7 @@ async def get_action_plans(
     parent_type: Optional[str] = Query(None),
     pillar_id: Optional[str] = Query(None),
     dashboard_id: Optional[str] = Query(None),
+    gant_step_id: Optional[str] = Query(None),  # 🆕 filtro per step del Gant
     
     # 🆕 Filtro cancellati
     include_cancelled: Optional[bool] = Query(False),
@@ -222,6 +223,12 @@ async def get_action_plans(
         query["pillar_id"] = pillar_id
     if dashboard_id:
         query["dashboard_id"] = dashboard_id
+    if gant_step_id:
+        # Filtro speciale: 'none' = standalone (AP senza step), altrimenti id step preciso
+        if gant_step_id == 'none':
+            query["gant_step_id"] = {"$in": [None, ""]}
+        else:
+            query["gant_step_id"] = gant_step_id
     
     if tag:
         query["tags"] = tag
@@ -425,6 +432,7 @@ async def create_action_plan(plan: ActionPlanCreate):
         "dependencies": plan.dependencies or [],
         "gantt_progress": plan.gantt_progress or 0,
         "gantt_milestone": plan.gantt_milestone or False,
+        "gant_step_id": plan.gant_step_id,  # 🆕 step Gant macro (None = standalone)
         
         "is_active": True,
         "created_at": datetime.now(timezone.utc),
