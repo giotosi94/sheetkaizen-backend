@@ -39,6 +39,33 @@ def extract_mentions_and_tags(text: str):
     return list(set(mentions)), list(set(tags))
 
 
+async def is_ap_locked(plan: dict) -> bool:
+    """Restituisce True se lo stato attuale dell'AP è 'terminal' (lock)."""
+    stato_label = plan.get("stato")
+    if not stato_label:
+        return False
+    config = await db.configurazioni.find_one({
+        "tipo": "stato_ap",
+        "label": stato_label,
+    })
+    if not config:
+        return False
+    return bool(config.get("is_terminal", False))
+
+
+async def is_stato_terminal(stato_label: str) -> bool:
+    """Restituisce True se uno stato (per label) è marcato come terminal."""
+    if not stato_label:
+        return False
+    config = await db.configurazioni.find_one({
+        "tipo": "stato_ap",
+        "label": stato_label,
+    })
+    if not config:
+        return False
+    return bool(config.get("is_terminal", False))
+
+
 async def resolve_pillar_from_parent(parent_type: str, parent_id: str) -> Optional[str]:
     """Risolve il pillar_id automaticamente in base al parent."""
     if not parent_type or not parent_id:
@@ -465,6 +492,18 @@ async def update_action_plan(plan_id: str, update: ActionPlanUpdate):
     
     update_data = {k: v for k, v in update.dict().items() if v is not None}
     
+    # 🔒 LOCK: se AP è in stato terminale, blocca tutte le modifiche
+    # tranne il cambio di stato (necessario per la riapertura)
+    if await is_ap_locked(existing):
+        allowed_keys = {"stato"}
+        attempted_keys = set(update_data.keys())
+        forbidden = attempted_keys - allowed_keys
+        if forbidden:
+            raise HTTPException(
+                status_code=403,
+                detail=f"Action Plan chiuso (stato terminale). Riaprilo prima di modificarlo.",
+            )
+    
     if "parent_type" in update_data or "parent_id" in update_data:
         new_parent_type = update_data.get("parent_type", existing.get("parent_type"))
         new_parent_id = update_data.get("parent_id", existing.get("parent_id"))
@@ -489,11 +528,24 @@ async def update_action_plan(plan_id: str, update: ActionPlanUpdate):
         update_data["data_completamento"] = datetime.now(timezone.utc)
         update_data["avanzamento"] = 100
     
+    # 🔓 Detection riapertura: se sto cambiando da terminale -> non terminale
+    was_terminal = await is_stato_terminal(existing.get("stato"))
+    new_stato = update_data.get("stato")
+    is_riapertura = (
+        was_terminal
+        and new_stato is not None
+        and not await is_stato_terminal(new_stato)
+    )
+    
     feed_entry = {
         "id": str(uuid.uuid4()),
         "utente": "Default User",
-        "azione": f"AP aggiornato",
-        "tipo_evento": "update",
+        "azione": (
+            f"🔓 Riaperto: stato {existing.get('stato')} → {new_stato}"
+            if is_riapertura
+            else "AP aggiornato"
+        ),
+        "tipo_evento": "reopen" if is_riapertura else "update",
         "changes": {k: v for k, v in update_data.items() if k != "updated_at"},
         "timestamp": datetime.now(timezone.utc),
     }
@@ -516,6 +568,10 @@ async def add_commento(plan_id: str, payload: dict):
     autore = payload.get("autore", "Default User")
     if not testo:
         raise HTTPException(status_code=400, detail="Testo commento mancante")
+    
+    ap = await db.action_plans.find_one({"_id": ObjectId(plan_id)})
+    if ap and await is_ap_locked(ap):
+        raise HTTPException(status_code=403, detail="Action Plan chiuso. Riaprilo per aggiungere commenti.")
     
     mentions, tags = extract_mentions_and_tags(testo)
     
@@ -570,6 +626,10 @@ async def add_checklist_item(plan_id: str, payload: dict):
     testo = payload.get("testo", "").strip()
     if not testo:
         raise HTTPException(status_code=400, detail="Testo mancante")
+    
+    ap = await db.action_plans.find_one({"_id": ObjectId(plan_id)})
+    if ap and await is_ap_locked(ap):
+        raise HTTPException(status_code=403, detail="Action Plan chiuso. Riaprilo per modificare la checklist.")
     
     item = {
         "id": str(uuid.uuid4()),
@@ -643,18 +703,38 @@ async def cambia_stato(plan_id: str, payload: dict):
     if not nuovo_stato:
         raise HTTPException(status_code=400, detail="Stato mancante")
     
+    existing = await db.action_plans.find_one({"_id": ObjectId(plan_id)})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Action Plan non trovato")
+    
     update_data = {"stato": nuovo_stato, "updated_at": datetime.now(timezone.utc)}
     if nuovo_stato == "Done":
         update_data["data_completamento"] = datetime.now(timezone.utc)
         update_data["avanzamento"] = 100
-    elif nuovo_stato == "In Corso" and not (await db.action_plans.find_one({"_id": ObjectId(plan_id)})).get("data_inizio"):
+    elif nuovo_stato == "In Corso" and not existing.get("data_inizio"):
         update_data["data_inizio"] = datetime.now(timezone.utc)
+    
+    # 🔓 Detection riapertura: da terminale a non-terminale
+    was_terminal = await is_stato_terminal(existing.get("stato"))
+    new_terminal = await is_stato_terminal(nuovo_stato)
+    is_riapertura = was_terminal and not new_terminal
+    is_chiusura = (not was_terminal) and new_terminal
+    
+    if is_riapertura:
+        azione = f"🔓 Riaperto: stato {existing.get('stato')} → {nuovo_stato}"
+        tipo_evento = "reopen"
+    elif is_chiusura:
+        azione = f"🔒 Chiuso: stato → {nuovo_stato}"
+        tipo_evento = "close"
+    else:
+        azione = f"Stato → {nuovo_stato}"
+        tipo_evento = "status_change"
     
     feed_entry = {
         "id": str(uuid.uuid4()),
         "utente": payload.get("utente", "Default User"),
-        "azione": f"Stato → {nuovo_stato}",
-        "tipo_evento": "status_change",
+        "azione": azione,
+        "tipo_evento": tipo_evento,
         "timestamp": datetime.now(timezone.utc),
     }
     
