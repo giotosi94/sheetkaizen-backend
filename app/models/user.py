@@ -1,111 +1,76 @@
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr
 from typing import Optional, List
 from datetime import datetime
-import bcrypt
 
-
-# ============ RUOLI ============
-ROLE_ADMIN = "admin"
-ROLE_OFFICE = "office"
-ROLE_PRODUCTION = "production"
-
-VALID_ROLES = [ROLE_ADMIN, ROLE_OFFICE, ROLE_PRODUCTION]
-
-
-# ============ INPUT MODELS ============
 
 class UserCreate(BaseModel):
-    """Modello per creazione utente (registrazione admin)"""
-    username: str
-    email: EmailStr
-    password: str
-    full_name: str
-    role: str = ROLE_OFFICE
+    """Payload per la creazione di un nuovo utente."""
+    username: str          # univoco, es "gtosi"
+    email: EmailStr        # es "gtosi@lindt.com"
+    nome: str              # nome completo "Giovanni Tosi"
+    password: str          # password in chiaro (verrà hashata)
+
+    # Anagrafica
+    ruolo: str = "operator"  # "operator" | "office" | "manager" | "admin"
+    foto_url: Optional[str] = None
+    telefono: Optional[str] = None
+    job_title: Optional[str] = None  # "TPM Development Engineer"
+
+    # Reparto/Linea/Macchine (per operatori)
     reparto: Optional[str] = None
-    linee: List[str] = []
-    team: Optional[str] = None
+    linea: Optional[str] = None
+    macchine: List[str] = []
 
+    # Pillar (per ufficio/manager)
+    pillar_ids: List[str] = []          # Pillar di cui fa parte
+    pillar_leader_of: List[str] = []    # Pillar di cui è leader
 
-class UserLogin(BaseModel):
-    """Modello per login email + password"""
-    email: EmailStr
-    password: str
+    # Stato
+    attivo: bool = True
+    note: Optional[str] = None
 
 
 class UserUpdate(BaseModel):
-    """Modello per update utente (admin)"""
-    full_name: Optional[str] = None
-    role: Optional[str] = None
+    """Payload per aggiornare un utente (tutti campi opzionali)."""
+    username: Optional[str] = None
+    email: Optional[EmailStr] = None
+    nome: Optional[str] = None
+    password: Optional[str] = None
+
+    ruolo: Optional[str] = None
+    foto_url: Optional[str] = None
+    telefono: Optional[str] = None
+    job_title: Optional[str] = None
+
     reparto: Optional[str] = None
-    linee: Optional[List[str]] = None
-    team: Optional[str] = None
-    is_active: Optional[bool] = None
+    linea: Optional[str] = None
+    macchine: Optional[List[str]] = None
+
+    pillar_ids: Optional[List[str]] = None
+    pillar_leader_of: Optional[List[str]] = None
+
+    attivo: Optional[bool] = None
+    note: Optional[str] = None
 
 
-class PasswordChange(BaseModel):
-    """Modello per cambio password (utente)"""
-    old_password: str
-    new_password: str
-
-
-# ============ DB MODEL ============
-
-class UserInDB(BaseModel):
-    """Modello User completo in DB"""
-    id: Optional[str] = Field(default=None, alias="_id")
+class UserLogin(BaseModel):
+    """Payload per login (simulato per ora, vero in produzione)."""
     username: str
-    email: EmailStr
-    password_hash: Optional[str] = None   # null se solo SSO
-    azure_oid: Optional[str] = None        # null se solo locale (SSO Lindt futuro)
-    full_name: str
-    role: str = ROLE_OFFICE
-    reparto: Optional[str] = None
-    linee: List[str] = []
-    team: Optional[str] = None
-    is_active: bool = True
-    created_at: datetime = Field(default_factory=datetime.utcnow)
-    last_login: Optional[datetime] = None
+    password: str
 
-    class Config:
-        populate_by_name = True
-
-
-# ============ OUTPUT MODELS ============
 
 class UserPublic(BaseModel):
-    """Modello User restituito al frontend (senza password)"""
+    """Risposta pubblica utente (SENZA password hash)."""
     id: str
     username: str
     email: str
-    full_name: str
-    role: str
+    nome: str
+    ruolo: str
+    foto_url: Optional[str] = None
+    job_title: Optional[str] = None
     reparto: Optional[str] = None
-    linee: List[str] = []
-    team: Optional[str] = None
-    is_active: bool = True
-    last_login: Optional[datetime] = None
-
-
-class Token(BaseModel):
-    """Risposta login: JWT + dati utente"""
-    access_token: str
-    token_type: str = "bearer"
-    user: UserPublic
-
-
-# ============ PASSWORD UTILS ============
-
-def hash_password(password: str) -> str:
-    """Hash bcrypt della password"""
-    salt = bcrypt.gensalt()
-    return bcrypt.hashpw(password.encode("utf-8"), salt).decode("utf-8")
-
-
-def verify_password(password: str, password_hash: str) -> bool:
-    """Verifica password contro hash bcrypt"""
-    if not password_hash:
-        return False
-    try:
-        return bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("utf-8"))
-    except Exception:
-        return False
+    linea: Optional[str] = None
+    macchine: List[str] = []
+    pillar_ids: List[str] = []
+    pillar_leader_of: List[str] = []
+    attivo: bool = True
