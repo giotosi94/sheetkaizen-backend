@@ -186,3 +186,49 @@ async def sso_azure_login():
         status_code=501,
         detail="SSO Azure non ancora implementato. Disponibile in Fase 4.",
     )
+# ============ SETUP FIRST ADMIN (solo se DB vuoto) ============
+
+@router.post("/setup-first-admin", response_model=UserPublic)
+async def setup_first_admin(user: UserCreate):
+    """
+    Crea il PRIMO admin del sistema. Funziona SOLO se non esistono admin.
+    Una volta creato il primo admin, questo endpoint diventa inutilizzabile.
+    """
+    # Verifica che NON ci siano già admin
+    existing_admin = await db.users.find_one({"role": "admin"})
+    if existing_admin:
+        raise HTTPException(
+            status_code=403,
+            detail="Esiste già un admin. Usa /register con account admin.",
+        )
+
+    # Check email duplicata
+    existing = await db.users.find_one({"email": user.email.lower()})
+    if existing:
+        raise HTTPException(status_code=400, detail="Email già registrata")
+
+    # Check username duplicato
+    existing_username = await db.users.find_one({"username": user.username})
+    if existing_username:
+        raise HTTPException(status_code=400, detail="Username già esistente")
+
+    # Crea utente forzando role admin
+    new_user = {
+        "username": user.username,
+        "email": user.email.lower(),
+        "password_hash": hash_password(user.password),
+        "azure_oid": None,
+        "full_name": user.full_name,
+        "role": "admin",
+        "reparto": user.reparto,
+        "linee": user.linee or [],
+        "team": user.team,
+        "is_active": True,
+        "created_at": datetime.now(timezone.utc),
+        "last_login": None,
+    }
+
+    result = await db.users.insert_one(new_user)
+    new_user["_id"] = result.inserted_id
+
+    return _user_to_public(new_user)
