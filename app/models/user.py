@@ -72,5 +72,31 @@ class UserPublic(BaseModel):
     linea: Optional[str] = None
     macchine: List[str] = []
     pillar_ids: List[str] = []
+
+    # ──────────────────────────────────────────
+# COMPATIBILITÀ con vecchio auth.py (legacy)
+# ──────────────────────────────────────────
+
+class Token(BaseModel):
+    """Token JWT (per compatibilità con auth.py esistente)."""
+    access_token: str
+    token_type: str = "bearer"
+
+
+class TokenData(BaseModel):
+    """Dati estratti dal token."""
+    username: Optional[str] = None
+    user_id: Optional[str] = None
+
+
+class UserInDB(BaseModel):
+    """Utente come salvato nel DB (con password hash)."""
+    id: Optional[str] = None
+    username: str
+    email: str
+    nome: str
+    password_hash: str
+    ruolo: str = "operator"
+    attivo: bool = True
     pillar_leader_of: List[str] = []
     attivo: bool = True
