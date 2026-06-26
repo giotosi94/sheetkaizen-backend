@@ -39,5 +39,3 @@ app.include_router(uploads.router, prefix="/api/uploads", tags=["Uploads"])
 app.include_router(documenti.router, prefix="/api/documenti", tags=["Documenti"])
 app.include_router(configurazioni.router, prefix="/api/configurazioni", tags=["Configurazioni"])
 app.include_router(pillars.router, prefix="/api/pillars", tags=["Pillars"])
-
- modificva main py. 
