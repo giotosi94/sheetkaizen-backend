@@ -3,18 +3,22 @@ from typing import Optional, List
 from datetime import datetime
 
 
+# ──────────────────────────────────────────
+# MODELLO USER (nuovo sistema utenti)
+# ──────────────────────────────────────────
+
 class UserCreate(BaseModel):
     """Payload per la creazione di un nuovo utente."""
-    username: str          # univoco, es "gtosi"
-    email: EmailStr        # es "gtosi@lindt.com"
-    nome: str              # nome completo "Giovanni Tosi"
-    password: str          # password in chiaro (verrà hashata)
+    username: str
+    email: EmailStr
+    nome: str
+    password: str
 
     # Anagrafica
-    ruolo: str = "operator"  # "operator" | "office" | "manager" | "admin"
+    ruolo: str = "operator"
     foto_url: Optional[str] = None
     telefono: Optional[str] = None
-    job_title: Optional[str] = None  # "TPM Development Engineer"
+    job_title: Optional[str] = None
 
     # Reparto/Linea/Macchine (per operatori)
     reparto: Optional[str] = None
@@ -22,8 +26,8 @@ class UserCreate(BaseModel):
     macchine: List[str] = []
 
     # Pillar (per ufficio/manager)
-    pillar_ids: List[str] = []          # Pillar di cui fa parte
-    pillar_leader_of: List[str] = []    # Pillar di cui è leader
+    pillar_ids: List[str] = []
+    pillar_leader_of: List[str] = []
 
     # Stato
     attivo: bool = True
@@ -54,13 +58,13 @@ class UserUpdate(BaseModel):
 
 
 class UserLogin(BaseModel):
-    """Payload per login (simulato per ora, vero in produzione)."""
+    """Payload per login."""
     username: str
     password: str
 
 
 class UserPublic(BaseModel):
-    """Risposta pubblica utente (SENZA password hash)."""
+    """Risposta pubblica utente (senza password hash)."""
     id: str
     username: str
     email: str
@@ -72,13 +76,16 @@ class UserPublic(BaseModel):
     linea: Optional[str] = None
     macchine: List[str] = []
     pillar_ids: List[str] = []
+    pillar_leader_of: List[str] = []
+    attivo: bool = True
 
-    # ──────────────────────────────────────────
-# COMPATIBILITÀ con vecchio auth.py (legacy)
+
+# ──────────────────────────────────────────
+# COMPATIBILITÀ con auth.py esistente (LEGACY)
 # ──────────────────────────────────────────
 
 class Token(BaseModel):
-    """Token JWT (per compatibilità con auth.py esistente)."""
+    """Token JWT."""
     access_token: str
     token_type: str = "bearer"
 
@@ -90,7 +97,7 @@ class TokenData(BaseModel):
 
 
 class UserInDB(BaseModel):
-    """Utente come salvato nel DB (con password hash)."""
+    """Utente come salvato nel DB."""
     id: Optional[str] = None
     username: str
     email: str
@@ -98,5 +105,61 @@ class UserInDB(BaseModel):
     password_hash: str
     ruolo: str = "operator"
     attivo: bool = True
-    pillar_leader_of: List[str] = []
+
+
+class PasswordChange(BaseModel):
+    """Payload per cambio password."""
+    old_password: str
+    new_password: str
+
+
+class PasswordReset(BaseModel):
+    """Payload per reset password (richiesta)."""
+    email: str
+
+
+class PasswordResetConfirm(BaseModel):
+    """Payload per conferma reset password."""
+    token: str
+    new_password: str
+
+
+class UserResponse(BaseModel):
+    """Risposta utente API."""
+    id: str
+    username: str
+    email: str
+    nome: str
+    ruolo: str
     attivo: bool = True
+
+
+class UserProfile(BaseModel):
+    """Profilo utente esteso."""
+    id: str
+    username: str
+    email: str
+    nome: str
+    ruolo: str
+    foto_url: Optional[str] = None
+    job_title: Optional[str] = None
+    telefono: Optional[str] = None
+    attivo: bool = True
+
+
+class LoginResponse(BaseModel):
+    """Risposta dopo login."""
+    access_token: str
+    token_type: str = "bearer"
+    user: dict
+
+
+class RefreshToken(BaseModel):
+    """Payload per refresh token."""
+    refresh_token: str
+
+
+class UserRole(BaseModel):
+    """Ruolo utente."""
+    name: str
+    permissions: List[str] = []
