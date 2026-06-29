@@ -165,6 +165,10 @@ async def create_kaizen(kaizen: KaizenCreate):
         # Pillar
         "pillar_id": kaizen.pillar_id,
 
+        # 🆕 Meeting/Dashboard
+        "dashboard_id": kaizen.dashboard_id,
+        "dashboard_nome": kaizen.dashboard_nome,
+
         "data_apertura": datetime.now(timezone.utc),
         "data_chiusura": None,
         "passo1_definizione": {
