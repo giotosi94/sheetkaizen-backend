@@ -311,3 +311,175 @@ async def delete_pillar(pillar_id: str):
         "message": f"Pillar eliminato",
         "kaizens_scollegati": kaizens_count
     }
+# ============================================================
+# 🆕 ANALYSES — Gestione analisi multiple del 5 Step KPI
+# ============================================================
+
+from uuid import uuid4
+
+
+def _empty_analysis(label: str = ""):
+    """Crea una struttura analisi vuota."""
+    return {
+        "id": str(uuid4()),
+        "label": label or f"Analisi {datetime.now(timezone.utc).strftime('%Y-%m-%d')}",
+        "status": "active",  # active | archived
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "archived_at": None,
+        "step1_kpi_definition": {"completato": False, "note": ""},
+        "step2_pareto_analysis": {"completato": False, "note": ""},
+        "step3_target_definition": {"completato": False, "note": ""},
+        "step4_implementation": {"completato": False, "note": ""},
+        "step5_close_the_loop": {"completato": False, "note": ""},
+    }
+
+
+@router.get("/{pillar_id}/analyses")
+async def list_analyses(pillar_id: str):
+    """Restituisce la lista delle analisi del Pillar (active + archived)."""
+    pillar = await db.pillars.find_one({"_id": ObjectId(pillar_id)})
+    if not pillar:
+        raise HTTPException(status_code=404, detail="Pillar non trovato")
+
+    analyses = pillar.get("analyses", [])
+
+    # Backfill: se ci sono step1-5 legacy ma niente analyses, creane una default
+    if not analyses and any(pillar.get(f"step{i}_{n}") for i, n in [
+        (1, "kpi_definition"), (2, "pareto_analysis"),
+        (3, "target_definition"), (4, "implementation"), (5, "close_the_loop")
+    ]):
+        legacy = {
+            "id": str(uuid4()),
+            "label": "Analisi principale",
+            "status": "active",
+            "created_at": (pillar.get("created_at") or datetime.now(timezone.utc)).isoformat() if isinstance(pillar.get("created_at"), datetime) else datetime.now(timezone.utc).isoformat(),
+            "archived_at": None,
+            "step1_kpi_definition": pillar.get("step1_kpi_definition") or {"completato": False, "note": ""},
+            "step2_pareto_analysis": pillar.get("step2_pareto_analysis") or {"completato": False, "note": ""},
+            "step3_target_definition": pillar.get("step3_target_definition") or {"completato": False, "note": ""},
+            "step4_implementation": pillar.get("step4_implementation") or {"completato": False, "note": ""},
+            "step5_close_the_loop": pillar.get("step5_close_the_loop") or {"completato": False, "note": ""},
+        }
+        analyses = [legacy]
+        await db.pillars.update_one(
+            {"_id": ObjectId(pillar_id)},
+            {"$set": {"analyses": analyses}}
+        )
+
+    return analyses
+
+
+@router.post("/{pillar_id}/analyses")
+async def create_analysis(pillar_id: str, payload: Dict[str, Any]):
+    """Crea una nuova analisi VUOTA per il Pillar."""
+    pillar = await db.pillars.find_one({"_id": ObjectId(pillar_id)})
+    if not pillar:
+        raise HTTPException(status_code=404, detail="Pillar non trovato")
+
+    label = (payload or {}).get("label", "").strip() or f"Analisi {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}"
+    new_analysis = _empty_analysis(label)
+
+    await db.pillars.update_one(
+        {"_id": ObjectId(pillar_id)},
+        {
+            "$push": {"analyses": new_analysis},
+            "$set": {"updated_at": datetime.now(timezone.utc)},
+        }
+    )
+
+    return new_analysis
+
+
+@router.put("/{pillar_id}/analyses/{analysis_id}")
+async def update_analysis(pillar_id: str, analysis_id: str, payload: Dict[str, Any]):
+    """Aggiorna i campi di una specifica analisi (label, step1-5, status, ecc.)."""
+    pillar = await db.pillars.find_one({"_id": ObjectId(pillar_id)})
+    if not pillar:
+        raise HTTPException(status_code=404, detail="Pillar non trovato")
+
+    analyses = pillar.get("analyses", [])
+    found = False
+    for i, a in enumerate(analyses):
+        if a.get("id") == analysis_id:
+            # Aggiorno solo i campi presenti nel payload
+            for key, value in (payload or {}).items():
+                analyses[i][key] = value
+            found = True
+            break
+
+    if not found:
+        raise HTTPException(status_code=404, detail="Analisi non trovata")
+
+    await db.pillars.update_one(
+        {"_id": ObjectId(pillar_id)},
+        {"$set": {"analyses": analyses, "updated_at": datetime.now(timezone.utc)}}
+    )
+    return analyses[i]
+
+
+@router.post("/{pillar_id}/analyses/{analysis_id}/archive")
+async def archive_analysis(pillar_id: str, analysis_id: str):
+    """Archivia una analisi (status = archived)."""
+    pillar = await db.pillars.find_one({"_id": ObjectId(pillar_id)})
+    if not pillar:
+        raise HTTPException(status_code=404, detail="Pillar non trovato")
+
+    analyses = pillar.get("analyses", [])
+    found = False
+    for i, a in enumerate(analyses):
+        if a.get("id") == analysis_id:
+            analyses[i]["status"] = "archived"
+            analyses[i]["archived_at"] = datetime.now(timezone.utc).isoformat()
+            found = True
+            break
+
+    if not found:
+        raise HTTPException(status_code=404, detail="Analisi non trovata")
+
+    await db.pillars.update_one(
+        {"_id": ObjectId(pillar_id)},
+        {"$set": {"analyses": analyses, "updated_at": datetime.now(timezone.utc)}}
+    )
+    return {"message": "Analisi archiviata", "analysis": analyses[i]}
+
+
+@router.post("/{pillar_id}/analyses/{analysis_id}/restore")
+async def restore_analysis(pillar_id: str, analysis_id: str):
+    """Riporta una analisi archiviata in stato active."""
+    pillar = await db.pillars.find_one({"_id": ObjectId(pillar_id)})
+    if not pillar:
+        raise HTTPException(status_code=404, detail="Pillar non trovato")
+
+    analyses = pillar.get("analyses", [])
+    found = False
+    for i, a in enumerate(analyses):
+        if a.get("id") == analysis_id:
+            analyses[i]["status"] = "active"
+            analyses[i]["archived_at"] = None
+            found = True
+            break
+
+    if not found:
+        raise HTTPException(status_code=404, detail="Analisi non trovata")
+
+    await db.pillars.update_one(
+        {"_id": ObjectId(pillar_id)},
+        {"$set": {"analyses": analyses, "updated_at": datetime.now(timezone.utc)}}
+    )
+    return {"message": "Analisi ripristinata", "analysis": analyses[i]}
+
+
+@router.delete("/{pillar_id}/analyses/{analysis_id}")
+async def delete_analysis(pillar_id: str, analysis_id: str):
+    """Elimina definitivamente una analisi (use con cautela!)."""
+    pillar = await db.pillars.find_one({"_id": ObjectId(pillar_id)})
+    if not pillar:
+        raise HTTPException(status_code=404, detail="Pillar non trovato")
+
+    analyses = [a for a in pillar.get("analyses", []) if a.get("id") != analysis_id]
+
+    await db.pillars.update_one(
+        {"_id": ObjectId(pillar_id)},
+        {"$set": {"analyses": analyses, "updated_at": datetime.now(timezone.utc)}}
+    )
+    return {"message": "Analisi eliminata"}
