@@ -140,6 +140,9 @@ class PillarUpdate(BaseModel):
     step3_target_definition: Optional[Dict[str, Any]] = None
     step4_implementation: Optional[Dict[str, Any]] = None
     step5_close_the_loop: Optional[Dict[str, Any]] = None
+
+    # 🆕 Analisi multiple (lista di 5-step indipendenti)
+    analyses: Optional[List[Dict[str, Any]]] = None
     
     # 🆕 Master Plan multi-anno (timeline trimestrale)
     gantt_items: Optional[List[Dict[str, Any]]] = None
