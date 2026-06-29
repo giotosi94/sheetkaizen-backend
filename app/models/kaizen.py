@@ -50,6 +50,10 @@ class KaizenCreate(BaseModel):
     # Pillar di appartenenza
     pillar_id: Optional[str] = None
 
+    # 🆕 Meeting/Dashboard di origine (Kaizen nato da un PCS Daily, Steering, ecc.)
+    dashboard_id: Optional[str] = None
+    dashboard_nome: Optional[str] = None
+
 
 class KaizenUpdate(BaseModel):
     titolo: Optional[str] = None
@@ -87,6 +91,10 @@ class KaizenUpdate(BaseModel):
 
     # Pillar di appartenenza
     pillar_id: Optional[str] = None
+
+    # 🆕 Meeting/Dashboard
+    dashboard_id: Optional[str] = None
+    dashboard_nome: Optional[str] = None
 
     # Gerarchia (per linkare/slinkare un padre)
     parent_kaizen_id: Optional[str] = None
