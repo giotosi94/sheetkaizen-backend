@@ -458,6 +458,42 @@ async def bulk_upload_documenti(
     return results
 
 # ============================================================
+# PREVIEW PUBBLICA — per Office Online Viewer (no auth)
+# ============================================================
+@router.get("/{documento_id}/preview")
+async def preview_file_public(documento_id: str):
+    """
+    Endpoint PUBBLICO per anteprima file (usato da Office Online Viewer).
+    NON richiede autenticazione (sennò il Viewer Microsoft non può caricare).
+
+    Sicurezza: opzionalmente filtriamo per stato Approvato in futuro.
+    """
+    doc = await db.documenti.find_one({"_id": ObjectId(documento_id)})
+    if not doc or not doc.get("file_id"):
+        raise HTTPException(status_code=404, detail="File non trovato")
+
+    bucket = get_bucket()
+    try:
+        stream = await bucket.open_download_stream(ObjectId(doc["file_id"]))
+        content_type = (
+            stream.metadata.get("content_type", "application/octet-stream")
+            if stream.metadata else "application/octet-stream"
+        )
+        data = await stream.read()
+        filename = doc.get("file_name", "documento")
+        return StreamingResponse(
+            io.BytesIO(data),
+            media_type=content_type,
+            headers={
+                "Content-Disposition": f'inline; filename="{filename}"',
+                "Access-Control-Allow-Origin": "*",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=f"File non trovato: {str(e)}")
+
+# ============================================================
 # DOWNLOAD
 # ============================================================
 @router.get("/{documento_id}/file")
