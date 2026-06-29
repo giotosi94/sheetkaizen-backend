@@ -3,7 +3,7 @@ from app.database import db
 from app.models.pillar import PillarCreate, PillarUpdate, LinkKaizenToPillarPayload
 from bson import ObjectId
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Dict, Any
 
 router = APIRouter()
 
