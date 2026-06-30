@@ -77,18 +77,31 @@ async def get_pillar_stats(pillar_id: str):
     pillar = await db.pillars.find_one({"_id": ObjectId(pillar_id)})
     if not pillar:
         raise HTTPException(status_code=404, detail="Pillar non trovato")
-    
-    # Conta kaizen per livello
+
     stats = {
+        # Kaizen
         "totale_kaizen": 0,
         "quick": 0,
         "standard": 0,
         "major": 0,
+        "kaizen_aperti": 0,
+        "kaizen_in_corso": 0,
+        "kaizen_chiusi": 0,
+        # Compat retro (vecchie chiavi)
         "aperti": 0,
-        "chiusi": 0,
         "in_corso": 0,
+        "chiusi": 0,
+        # Action Plan
+        "totale_ap": 0,
+        "ap_da_fare": 0,
+        "ap_in_corso": 0,
+        "ap_done": 0,
+        # Step KPI
+        "steps_completed": 0,
+        "steps_total": 5,
     }
-    
+
+    # KAIZEN
     cursor = db.kaizens.find({"pillar_id": pillar_id})
     async for k in cursor:
         stats["totale_kaizen"] += 1
@@ -99,23 +112,64 @@ async def get_pillar_stats(pillar_id: str):
             stats["standard"] += 1
         elif "Major" in livello:
             stats["major"] += 1
-        
+
         stato = k.get("stato", "Aperto")
         if stato == "Aperto":
+            stats["kaizen_aperti"] += 1
             stats["aperti"] += 1
         elif stato in ["Chiuso", "Done"]:
+            stats["kaizen_chiusi"] += 1
             stats["chiusi"] += 1
         else:
+            stats["kaizen_in_corso"] += 1
             stats["in_corso"] += 1
-    
-    # Step completati
-    steps_completed = 0
-    for step_key in ["step1_kpi_definition", "step2_pareto_analysis", "step3_target_definition", "step4_implementation", "step5_close_the_loop"]:
-        if pillar.get(step_key, {}).get("completato"):
-            steps_completed += 1
-    stats["steps_completed"] = steps_completed
-    stats["steps_total"] = 5
-    
+
+    # ACTION PLAN
+    cursor = db.action_plans.find({
+        "pillar_id": pillar_id,
+        "is_active": {"$ne": False},
+    })
+    async for ap in cursor:
+        # Esclude AP cancellati
+        if ap.get("is_cancelled"):
+            continue
+        stats["totale_ap"] += 1
+        stato = (ap.get("stato") or "").lower()
+        if stato in ["done", "completato", "chiuso", "completed", "fatto"]:
+            stats["ap_done"] += 1
+        elif stato in ["in corso", "in_corso", "in_progress", "wip", "doing"]:
+            stats["ap_in_corso"] += 1
+        else:
+            # Tutto il resto (Da Valutare, To Do, Aperto, ecc.)
+            stats["ap_da_fare"] += 1
+
+    # STEP KPI MANAGEMENT (dalle analyses attive, oppure legacy se non ci sono)
+    analyses = pillar.get("analyses", [])
+    if analyses:
+        # Prendi la prima analisi attiva
+        active = next((a for a in analyses if a.get("status") == "active"), None)
+        if active:
+            for step_key in [
+                "step1_kpi_definition",
+                "step2_pareto_analysis",
+                "step3_target_definition",
+                "step4_implementation",
+                "step5_close_the_loop",
+            ]:
+                if active.get(step_key, {}).get("completato"):
+                    stats["steps_completed"] += 1
+    else:
+        # Legacy: leggi direttamente dal pillar
+        for step_key in [
+            "step1_kpi_definition",
+            "step2_pareto_analysis",
+            "step3_target_definition",
+            "step4_implementation",
+            "step5_close_the_loop",
+        ]:
+            if pillar.get(step_key, {}).get("completato"):
+                stats["steps_completed"] += 1
+
     return stats
 
 
