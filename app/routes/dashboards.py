@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, Depends
 from app.database import db
 from app.models.dashboard import DashboardCreate, DashboardUpdate
-from app.auth import get_current_user
+from app.middleware.auth import get_current_user
 from bson import ObjectId
 from datetime import datetime, timezone
 import copy
