@@ -5,13 +5,16 @@ from datetime import datetime
 
 # Tipologie supportate dal sistema Settings
 TIPO_CONFIG = Literal[
-    "tipi_action_plan",        
+    "tipi_action_plan",
     "ap_5m",                   # Man, Machine, Method, Material, Measurement
     "priorita_ap",             # Low, Medium, High, Critical
     "stato_ap",                # Da Valutare, Aperto, In Corso, In Verifica, Done
     "categorie_documento",     # OPL, SOP
-    "categorie_perdita",       
-    "argomenti",               
+    "categorie_perdita",
+    "cluster_perdita",         # Raggruppamenti perdite per Pareto Pillar
+    "argomenti",
+    "tipi_meeting",            # Tipi di Meeting/Dashboard
+    "categoria_skill",         # Categorie standard LPW per Skill Matrix
 ]
 
 
