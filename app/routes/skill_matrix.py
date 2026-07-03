@@ -95,10 +95,47 @@ async def list_matrix_years(pillar_id: str):
 
 @router.get("/pillars/{pillar_id}/skill-matrix/{anno}")
 async def get_matrix_by_year(pillar_id: str, anno: int):
-    """Restituisce la matrice per un dato anno. Se non esiste, la crea vuota."""
+    """Restituisce la matrice per un dato anno. Se non esiste:
+    - se esiste un anno precedente, eredita members/competenze e usa
+      il Current precedente come Starting bloccato del nuovo anno
+    - altrimenti crea vuota con le competenze correnti del pillar
+    """
     matrix = await db.skill_matrix.find_one({"pillar_id": pillar_id, "anno": anno})
-    if not matrix:
-        # Auto-crea vuota con le competenze correnti del pillar
+    if matrix:
+        return _serialize(matrix)
+
+    # Cerca l'anno precedente piu recente (< anno richiesto)
+    previous = await db.skill_matrix.find_one(
+        {"pillar_id": pillar_id, "anno": {"$lt": anno}},
+        sort=[("anno", -1)],
+    )
+
+    if previous:
+        # Eredita da anno precedente: Current -> Starting (bloccato)
+        new_valori = {}
+        for key, cell in (previous.get("valori") or {}).items():
+            if not isinstance(cell, dict):
+                continue
+            new_valori[key] = {
+                "starting": cell.get("current"),
+                "current": None,
+                "target": cell.get("target"),
+                "note": None,
+            }
+
+        doc = {
+            "pillar_id": pillar_id,
+            "anno": anno,
+            "competenze": previous.get("competenze", []),
+            "members": previous.get("members", []),
+            "valori": new_valori,
+            "starting_locked": True,
+            "inherited_from": previous.get("anno"),
+            "created_at": datetime.now(timezone.utc),
+            "updated_at": datetime.now(timezone.utc),
+        }
+    else:
+        # Nessun anno precedente: crea vuota con competenze correnti del pillar
         competenze_cursor = db.skill_competenze.find({"pillar_id": pillar_id}).sort("ordine", 1)
         competenze = []
         async for c in competenze_cursor:
@@ -116,12 +153,13 @@ async def get_matrix_by_year(pillar_id: str, anno: int):
             "competenze": competenze,
             "members": [],
             "valori": {},
+            "starting_locked": False,
             "created_at": datetime.now(timezone.utc),
             "updated_at": datetime.now(timezone.utc),
         }
-        result = await db.skill_matrix.insert_one(doc)
-        matrix = await db.skill_matrix.find_one({"_id": result.inserted_id})
 
+    result = await db.skill_matrix.insert_one(doc)
+    matrix = await db.skill_matrix.find_one({"_id": result.inserted_id})
     return _serialize(matrix)
 
 
