@@ -11,7 +11,7 @@ router = APIRouter()
 
 
 # ─────────────────────────────────────────────
-# Models (inline, semplici)
+# Models
 # ─────────────────────────────────────────────
 
 class FolderCreate(BaseModel):
@@ -27,7 +27,7 @@ class FolderUpdate(BaseModel):
 
 
 class MoveAnalisiPayload(BaseModel):
-    folder_id: Optional[str] = None  # None = sposta in root
+    folder_id: Optional[str] = None  # None = root
 
 
 # ─────────────────────────────────────────────
@@ -42,7 +42,6 @@ def _serialize(doc):
 
 
 async def _build_path(pillar_id: str, parent_id: Optional[str], nome: str) -> str:
-    """Costruisce path denormalizzato tipo '2026/OEE/Bindler'."""
     if not parent_id:
         return nome
     parent = await db.pillar_folders.find_one(
@@ -55,7 +54,6 @@ async def _build_path(pillar_id: str, parent_id: Optional[str], nome: str) -> st
 
 
 async def _would_create_cycle(folder_id: str, new_parent_id: str, pillar_id: str) -> bool:
-    """Verifica che spostare folder_id sotto new_parent_id non crei un ciclo."""
     if folder_id == new_parent_id:
         return True
     current = new_parent_id
@@ -74,7 +72,6 @@ async def _would_create_cycle(folder_id: str, new_parent_id: str, pillar_id: str
 
 
 async def _refresh_descendants_path(pillar_id: str, folder_id: str):
-    """Ricalcola il path di tutti i discendenti di folder_id."""
     folder = await db.pillar_folders.find_one(
         {"_id": ObjectId(folder_id), "pillar_id": pillar_id}
     )
@@ -94,7 +91,7 @@ async def _refresh_descendants_path(pillar_id: str, folder_id: str):
 
 
 # ─────────────────────────────────────────────
-# ROUTES
+# ROUTES: FOLDERS
 # ─────────────────────────────────────────────
 
 @router.get("/pillars/{pillar_id}/folders")
@@ -109,14 +106,12 @@ async def list_folders(pillar_id: str, user=Depends(get_current_user)):
 
 @router.post("/pillars/{pillar_id}/folders")
 async def create_folder(pillar_id: str, payload: FolderCreate, user=Depends(get_current_user)):
-    """Crea una nuova cartella (root o sotto un'altra)."""
     nome = (payload.nome or "").strip()
     if not nome:
         raise HTTPException(400, "Nome cartella obbligatorio")
 
     path = await _build_path(pillar_id, payload.parent_id, nome)
 
-    # Evita duplicati con stesso path nello stesso pillar
     existing = await db.pillar_folders.find_one({"pillar_id": pillar_id, "path": path})
     if existing:
         raise HTTPException(400, f"Cartella già esistente: {path}")
@@ -142,7 +137,6 @@ async def update_folder(
     payload: FolderUpdate,
     user=Depends(get_current_user),
 ):
-    """Rinomina, riordina o sposta una cartella."""
     folder = await db.pillar_folders.find_one(
         {"_id": ObjectId(folder_id), "pillar_id": pillar_id}
     )
@@ -161,7 +155,6 @@ async def update_folder(
         updates["nome"] = n
 
     if payload.parent_id is not None:
-        # Consenti spostamento in root passando stringa vuota
         target_parent = payload.parent_id or None
         if target_parent:
             if await _would_create_cycle(folder_id, target_parent, pillar_id):
@@ -172,7 +165,6 @@ async def update_folder(
     if payload.ordine is not None:
         updates["ordine"] = payload.ordine
 
-    # Se cambia nome o parent, ricalcola path
     if "nome" in updates or "parent_id" in updates:
         new_path = await _build_path(pillar_id, new_parent, new_nome)
         conflict = await db.pillar_folders.find_one(
@@ -189,7 +181,6 @@ async def update_folder(
         {"$set": updates},
     )
 
-    # Se path è cambiato, aggiorna i discendenti
     if "path" in updates:
         await _refresh_descendants_path(pillar_id, folder_id)
 
@@ -210,17 +201,16 @@ async def delete_folder(
     if not folder:
         raise HTTPException(404, "Cartella non trovata")
 
-    # Check sotto-cartelle
     children = await db.pillar_folders.count_documents(
         {"pillar_id": pillar_id, "parent_id": folder_id}
     )
     if children > 0:
         raise HTTPException(400, "Cartella non vuota: contiene sotto-cartelle")
 
-    # Check analisi dentro
-    analisi_dentro = await db.pillar_analisi.count_documents(
-        {"pillar_id": pillar_id, "folder_id": folder_id}
-    )
+    # Check analisi dentro (le analisi sono embedded nel pillar)
+    pillar = await db.pillars.find_one({"_id": ObjectId(pillar_id)})
+    analyses = (pillar or {}).get("analyses", [])
+    analisi_dentro = sum(1 for a in analyses if a.get("folder_id") == folder_id)
     if analisi_dentro > 0:
         raise HTTPException(400, "Cartella non vuota: contiene analisi")
 
@@ -228,15 +218,20 @@ async def delete_folder(
     return {"message": "Cartella eliminata"}
 
 
-@router.put("/pillars/{pillar_id}/analisi/{analisi_id}/move")
-async def move_analisi(
+# ─────────────────────────────────────────────
+# ROUTE: MOVE ANALISI (embedded in pillar.analyses[])
+# ─────────────────────────────────────────────
+
+@router.put("/pillars/{pillar_id}/analyses/{analysis_id}/move")
+async def move_analysis(
     pillar_id: str,
-    analisi_id: str,
+    analysis_id: str,
     payload: MoveAnalisiPayload,
     user=Depends(get_current_user),
 ):
-    """Sposta un'analisi in una cartella (o in root se folder_id=None)."""
+    """Sposta un'analisi (embedded in pillar.analyses[]) in una cartella o in root."""
     target = payload.folder_id or None
+
     if target:
         folder = await db.pillar_folders.find_one(
             {"_id": ObjectId(target), "pillar_id": pillar_id}
@@ -244,11 +239,24 @@ async def move_analisi(
         if not folder:
             raise HTTPException(404, "Cartella destinazione non trovata")
 
-    result = await db.pillar_analisi.update_one(
-        {"_id": ObjectId(analisi_id), "pillar_id": pillar_id},
-        {"$set": {"folder_id": target, "updated_at": datetime.now(timezone.utc)}},
-    )
-    if result.matched_count == 0:
+    pillar = await db.pillars.find_one({"_id": ObjectId(pillar_id)})
+    if not pillar:
+        raise HTTPException(404, "Pillar non trovato")
+
+    analyses = pillar.get("analyses", [])
+    found = False
+    for i, a in enumerate(analyses):
+        if a.get("id") == analysis_id:
+            analyses[i]["folder_id"] = target
+            found = True
+            break
+
+    if not found:
         raise HTTPException(404, "Analisi non trovata")
 
-    return {"message": "Analisi spostata", "folder_id": target}
+    await db.pillars.update_one(
+        {"_id": ObjectId(pillar_id)},
+        {"$set": {"analyses": analyses, "updated_at": datetime.now(timezone.utc)}},
+    )
+
+    return {"message": "Analisi spostata", "folder_id": target, "analysis_id": analysis_id}
