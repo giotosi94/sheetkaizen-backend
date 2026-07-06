@@ -1,16 +1,47 @@
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Query
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form, Query, Depends
 from fastapi.responses import StreamingResponse
 from motor.motor_asyncio import AsyncIOMotorGridFSBucket
 from bson import ObjectId
 from datetime import datetime, timezone
 from typing import Optional
 import io
+import os
+import hmac
+import hashlib
+import time
 
 from app.database import db
 from app.models.documento import DocumentoCreate, DocumentoUpdate
 from app.utils.compressor import compress_file
+from app.middleware.auth import get_current_user
 
 router = APIRouter()
+
+
+# ============================================================
+# PREVIEW TOKEN HELPERS (HMAC firmato, valido 5 min)
+# ============================================================
+PREVIEW_SECRET = os.getenv("PREVIEW_TOKEN_SECRET") or os.getenv("JWT_SECRET") or "change-me-preview-secret"
+
+
+def generate_preview_token(documento_id: str, ttl_seconds: int = 300) -> str:
+    expires = int(time.time()) + ttl_seconds
+    payload = f"{documento_id}:{expires}"
+    sig = hmac.new(PREVIEW_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    return f"{expires}.{sig}"
+
+
+def verify_preview_token(documento_id: str, token: str) -> bool:
+    try:
+        expires_str, sig = token.split(".", 1)
+        expires = int(expires_str)
+        if expires < time.time():
+            return False
+        payload = f"{documento_id}:{expires}"
+        expected = hmac.new(PREVIEW_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+        return hmac.compare_digest(sig, expected)
+    except Exception:
+        return False
 
 
 def get_bucket():
@@ -458,16 +489,35 @@ async def bulk_upload_documenti(
     return results
 
 # ============================================================
-# PREVIEW PUBBLICA — per Office Online Viewer (no auth)
+# PREVIEW TOKEN — genera token temporaneo per Office Viewer
+# ============================================================
+@router.post("/{documento_id}/preview-token")
+async def create_preview_token(documento_id: str, user=Depends(get_current_user)):
+    """
+    Genera un token HMAC temporaneo (5 min) usato per far scaricare il file
+    a Office Online Viewer di Microsoft senza esporre l'endpoint pubblicamente.
+    Chiamato dal frontend prima di aprire il modal preview.
+    """
+    doc = await db.documenti.find_one({"_id": ObjectId(documento_id)})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Documento non trovato")
+    token = generate_preview_token(documento_id, ttl_seconds=300)
+    return {"token": token, "expires_in": 300, "documento_id": documento_id}
+
+
+# ============================================================
+# PREVIEW — endpoint scaricato da Office Online Viewer con token
 # ============================================================
 @router.get("/{documento_id}/preview")
-async def preview_file_public(documento_id: str):
+async def preview_file_public(documento_id: str, token: str = Query(...)):
     """
-    Endpoint PUBBLICO per anteprima file (usato da Office Online Viewer).
-    NON richiede autenticazione (sennò il Viewer Microsoft non può caricare).
+    Endpoint usato da Office Online Viewer per scaricare il file.
+    Non richiede header JWT (Microsoft non li supporta) ma valida un token
+    HMAC temporaneo (5 min) generato via /preview-token.
+    """
+    if not verify_preview_token(documento_id, token):
+        raise HTTPException(status_code=401, detail="Token preview non valido o scaduto")
 
-    Sicurezza: opzionalmente filtriamo per stato Approvato in futuro.
-    """
     doc = await db.documenti.find_one({"_id": ObjectId(documento_id)})
     if not doc or not doc.get("file_id"):
         raise HTTPException(status_code=404, detail="File non trovato")
