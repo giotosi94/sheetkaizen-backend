@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.database import connect_db, close_db
-from app.routes import auth, users, kaizens, action_plans, dashboards, reparti, uploads, documenti, configurazioni, pillars, skill_matrix, pillar_folders
+from app.routes import auth, users, kaizens, action_plans, dashboards, reparti, uploads, documenti, configurazioni, pillars, skill_matrix, pillar_folders, opl_setup
 
 app = FastAPI(title="SheetKaizen API", version="1.1.0")
 
