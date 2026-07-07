@@ -41,3 +41,4 @@ app.include_router(configurazioni.router, prefix="/api/configurazioni", tags=["C
 app.include_router(pillars.router, prefix="/api/pillars", tags=["Pillars"])
 app.include_router(skill_matrix.router, prefix="/api", tags=["skill_matrix"])
 app.include_router(pillar_folders.router, prefix="/api", tags=["Pillar Folders"])
+app.include_router(opl_setup.router, prefix="/api/setup", tags=["Setup"])
