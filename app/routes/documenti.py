@@ -839,6 +839,35 @@ async def update_opl_nativa(documento_id: str, payload: OplNativaPayload):
     updated["_id"] = str(updated["_id"])
     return updated
 
+# ============================================================
+# OPL NATIVA — Salvataggio annotazioni immagine
+# ============================================================
+
+class OplAnnotationsPayload(BaseModel):
+    annotations: list = []
+
+
+@router.patch("/{documento_id}/opl-annotations")
+async def update_opl_annotations(documento_id: str, payload: OplAnnotationsPayload):
+    """
+    Aggiorna solo l'array di annotazioni dell'immagine di un'OPL Nativa.
+    Le annotazioni sono oggetti JSON con posizione/tipo/dimensioni.
+    """
+    existing = await db.documenti.find_one({"_id": ObjectId(documento_id)})
+    if not existing:
+        raise HTTPException(status_code=404, detail="OPL non trovata")
+
+    opl_data = existing.get("opl_data", {}) or {}
+    opl_data["annotations"] = payload.annotations or []
+
+    await db.documenti.update_one(
+        {"_id": ObjectId(documento_id)},
+        {"$set": {
+            "opl_data": opl_data,
+            "updated_at": datetime.now(timezone.utc),
+        }}
+    )
+    return {"message": "Annotazioni salvate", "count": len(payload.annotations or [])}
 
 # ============================================================
 # AUTO-IMPORT DA SHAREPOINT (Power Automate)
