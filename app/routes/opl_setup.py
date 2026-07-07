@@ -1,8 +1,7 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter
 from datetime import datetime, timezone
 
 from app.database import db
-from app.middleware.auth import get_current_user
 
 router = APIRouter()
 
@@ -47,7 +46,7 @@ async def _upsert_config(tipo: str, item: dict):
 
 
 @router.post("/setup-opl-configs")
-async def setup_opl_configs(user=Depends(get_current_user)):
+async def setup_opl_configs():
     """
     Endpoint one-shot per inserire le configurazioni base delle OPL Native.
     Idempotente: se già presenti, non le duplica.
