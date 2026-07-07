@@ -508,29 +508,44 @@ async def create_preview_token(documento_id: str, user=Depends(get_current_user)
 # ============================================================
 # PREVIEW — endpoint scaricato da Office Online Viewer con token
 # ============================================================
-@router.get("/{documento_id}/preview")
-async def preview_file_public(documento_id: str, token: str = Query(...)):
-    """
-    Endpoint usato da Office Online Viewer per scaricare il file.
-    Non richiede header JWT (Microsoft non li supporta) ma valida un token
-    HMAC temporaneo (5 min) generato via /preview-token.
-    """
+async def _serve_preview(documento_id: str, token: str):
+    """Logica condivisa: verifica token e restituisce lo stream del file."""
     if not verify_preview_token(documento_id, token):
         raise HTTPException(status_code=401, detail="Token preview non valido o scaduto")
 
     doc = await db.documenti.find_one({"_id": ObjectId(documento_id)})
     if not doc or not doc.get("file_id"):
         raise HTTPException(status_code=404, detail="File non trovato")
+    return doc
+
+
+@router.get("/{documento_id}/preview.{ext}")
+async def preview_file_with_ext(documento_id: str, ext: str, token: str = Query(...)):
+    """
+    Endpoint con estensione nel path (richiesto da Office Online Viewer).
+    Esempio: /api/documenti/abc123/preview.xlsx?token=...
+    """
+    doc = await _serve_preview(documento_id, token)
 
     bucket = get_bucket()
     try:
         stream = await bucket.open_download_stream(ObjectId(doc["file_id"]))
-        content_type = (
-            stream.metadata.get("content_type", "application/octet-stream")
-            if stream.metadata else "application/octet-stream"
-        )
         data = await stream.read()
-        filename = doc.get("file_name", "documento")
+        filename = doc.get("file_name", f"documento.{ext}")
+        # Content-Type esplicito per Office
+        content_type_map = {
+            "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "xls": "application/vnd.ms-excel",
+            "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "doc": "application/msword",
+            "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            "ppt": "application/vnd.ms-powerpoint",
+        }
+        content_type = content_type_map.get(ext.lower())
+        if not content_type and stream.metadata:
+            content_type = stream.metadata.get("content_type", "application/octet-stream")
+        if not content_type:
+            content_type = "application/octet-stream"
         return StreamingResponse(
             io.BytesIO(data),
             media_type=content_type,
@@ -538,6 +553,7 @@ async def preview_file_public(documento_id: str, token: str = Query(...)):
                 "Content-Disposition": f'inline; filename="{filename}"',
                 "Access-Control-Allow-Origin": "*",
                 "X-Content-Type-Options": "nosniff",
+                "Cache-Control": "public, max-age=300",
             },
         )
     except Exception as e:
