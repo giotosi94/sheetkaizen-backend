@@ -650,6 +650,196 @@ async def delete_documento(documento_id: str):
     )
     return {"message": "Documento disattivato"}
 
+
+# ============================================================
+# OPL NATIVA — creazione/aggiornamento
+# ============================================================
+
+from pydantic import BaseModel
+from typing import Any
+
+
+class OplNativaPayload(BaseModel):
+    # Anagrafica
+    titolo: str
+    area_opl_id: Optional[str] = None
+    area_opl_label: Optional[str] = None
+    tipo_opl_id: Optional[str] = None
+    tipo_opl_label: Optional[str] = None
+    reparto: Optional[str] = None
+    linea: Optional[str] = None
+    macchina: Optional[str] = None
+    autore: Optional[str] = None
+
+    # Contenuto
+    problema: Optional[str] = ""
+    causa: Optional[str] = ""
+    miglioramento: Optional[str] = ""
+    immagine_base64: Optional[str] = None  # data URL o base64 puro
+
+    # Verifica apprendimento
+    verifica_1: Optional[str] = ""
+    verifica_2: Optional[str] = ""
+    verifica_3: Optional[str] = ""
+
+
+@router.post("/opl-nativa")
+async def create_opl_nativa(payload: OplNativaPayload):
+    """
+    Crea una OPL Nativa (record strutturato, no file esterno).
+    Il documento risultante ha tipo='OPL' e formato='nativa' per distinguerlo
+    dalle OPL caricate come file.
+    """
+    numero = await get_next_numero("OPL")
+
+    # Gestione immagine: se base64 → salva su GridFS
+    file_id = None
+    file_size = 0
+    if payload.immagine_base64:
+        import base64 as _b64
+        try:
+            b64 = payload.immagine_base64
+            if b64.startswith("data:"):
+                b64 = b64.split(",", 1)[1]
+            img_bytes = _b64.b64decode(b64)
+            file_size = len(img_bytes)
+            if file_size > 5 * 1024 * 1024:
+                raise HTTPException(status_code=400, detail="Immagine troppo grande (max 5MB)")
+            bucket = get_bucket()
+            file_id = await bucket.upload_from_stream(
+                f"{numero}_immagine.jpg",
+                img_bytes,
+                metadata={
+                    "content_type": "image/jpeg",
+                    "uploaded_at": datetime.now(timezone.utc).isoformat(),
+                    "source": "opl_nativa",
+                },
+            )
+            file_id = str(file_id)
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Errore immagine: {str(e)}")
+
+    doc = {
+        "numero": numero,
+        "titolo": payload.titolo,
+        "tipo": "OPL",
+        "formato": "nativa",  # ← distingue dalle OPL file
+        "categoria": payload.area_opl_label or "Operativa",
+        "reparto": payload.reparto,
+        "linea": payload.linea,
+        "macchina": payload.macchina,
+        "autore": payload.autore or "Utente LPW",
+        "descrizione": (payload.miglioramento or "")[:200],
+        "tag": ["opl-nativa"],
+        "stato": "Bozza",
+        "versione": 1,
+
+        # File (solo immagine)
+        "file_id": file_id,
+        "file_name": f"{numero}_immagine.jpg" if file_id else None,
+        "file_size": file_size,
+        "file_content_type": "image/jpeg" if file_id else None,
+
+        # Payload strutturato OPL
+        "opl_data": {
+            "area_opl_id": payload.area_opl_id,
+            "area_opl_label": payload.area_opl_label,
+            "tipo_opl_id": payload.tipo_opl_id,
+            "tipo_opl_label": payload.tipo_opl_label,
+            "problema": payload.problema or "",
+            "causa": payload.causa or "",
+            "miglioramento": payload.miglioramento or "",
+            "verifica_1": payload.verifica_1 or "",
+            "verifica_2": payload.verifica_2 or "",
+            "verifica_3": payload.verifica_3 or "",
+        },
+
+        "versioni_precedenti": [],
+        "kaizen_collegati": [],
+        "source": "opl_nativa_form",
+        "is_active": True,
+        "created_at": datetime.now(timezone.utc),
+        "updated_at": datetime.now(timezone.utc),
+    }
+
+    result = await db.documenti.insert_one(doc)
+    created = await db.documenti.find_one({"_id": result.inserted_id})
+    created["_id"] = str(created["_id"])
+    return created
+
+
+@router.put("/opl-nativa/{documento_id}")
+async def update_opl_nativa(documento_id: str, payload: OplNativaPayload):
+    """Aggiorna una OPL Nativa esistente."""
+    existing = await db.documenti.find_one({"_id": ObjectId(documento_id)})
+    if not existing:
+        raise HTTPException(status_code=404, detail="OPL non trovata")
+
+    # Gestione nuova immagine se cambiata
+    file_id = existing.get("file_id")
+    file_size = existing.get("file_size", 0)
+    if payload.immagine_base64 and not payload.immagine_base64.startswith("__existing"):
+        import base64 as _b64
+        try:
+            b64 = payload.immagine_base64
+            if b64.startswith("data:"):
+                b64 = b64.split(",", 1)[1]
+            img_bytes = _b64.b64decode(b64)
+            file_size = len(img_bytes)
+            if file_size > 5 * 1024 * 1024:
+                raise HTTPException(status_code=400, detail="Immagine troppo grande (max 5MB)")
+            bucket = get_bucket()
+            new_id = await bucket.upload_from_stream(
+                f"{existing.get('numero','OPL')}_immagine.jpg",
+                img_bytes,
+                metadata={
+                    "content_type": "image/jpeg",
+                    "uploaded_at": datetime.now(timezone.utc).isoformat(),
+                    "source": "opl_nativa_update",
+                },
+            )
+            file_id = str(new_id)
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Errore immagine: {str(e)}")
+
+    updates = {
+        "titolo": payload.titolo,
+        "categoria": payload.area_opl_label or existing.get("categoria"),
+        "reparto": payload.reparto,
+        "linea": payload.linea,
+        "macchina": payload.macchina,
+        "autore": payload.autore or existing.get("autore"),
+        "descrizione": (payload.miglioramento or "")[:200],
+        "file_id": file_id,
+        "file_size": file_size,
+        "opl_data": {
+            "area_opl_id": payload.area_opl_id,
+            "area_opl_label": payload.area_opl_label,
+            "tipo_opl_id": payload.tipo_opl_id,
+            "tipo_opl_label": payload.tipo_opl_label,
+            "problema": payload.problema or "",
+            "causa": payload.causa or "",
+            "miglioramento": payload.miglioramento or "",
+            "verifica_1": payload.verifica_1 or "",
+            "verifica_2": payload.verifica_2 or "",
+            "verifica_3": payload.verifica_3 or "",
+        },
+        "updated_at": datetime.now(timezone.utc),
+    }
+
+    await db.documenti.update_one(
+        {"_id": ObjectId(documento_id)},
+        {"$set": updates},
+    )
+    updated = await db.documenti.find_one({"_id": ObjectId(documento_id)})
+    updated["_id"] = str(updated["_id"])
+    return updated
+
+
 # ============================================================
 # AUTO-IMPORT DA SHAREPOINT (Power Automate)
 # ============================================================
