@@ -68,8 +68,7 @@ async def get_kaizens(
     livello: Optional[str] = Query(None),
     stato: Optional[str] = Query(None),
     reparto: Optional[str] = Query(None),
-    parent_kaizen_id: Optional[str] = None
-    archiviato: Optional[bool] = None
+    parent_kaizen_id: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
 ):
     query = {}
