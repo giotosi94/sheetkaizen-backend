@@ -98,6 +98,7 @@ class KaizenUpdate(BaseModel):
 
     # Gerarchia (per linkare/slinkare un padre)
     parent_kaizen_id: Optional[str] = None
+    archiviato: Optional[bool] = None
 
     # Sezioni Quick Kaizen (esistenti)
     passo1_definizione: Optional[Dict[str, Any]] = None
