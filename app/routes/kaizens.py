@@ -1,4 +1,5 @@
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
+from app.middleware.auth import require_admin
 from app.database import db
 from app.models.kaizen import KaizenCreate, KaizenUpdate, PromotePayload, LinkChildPayload, ChangeMethodologyPayload, LIVELLI_KAIZEN
 from bson import ObjectId
@@ -463,7 +464,7 @@ async def get_kaizen_action_plans(kaizen_id: str):
 # DELETE
 # ============================================================
 @router.delete("/{kaizen_id}")
-async def delete_kaizen(kaizen_id: str):
+async def delete_kaizen(kaizen_id: str, current_user: dict = Depends(require_admin)):
     kaizen = await db.kaizens.find_one({"_id": ObjectId(kaizen_id)})
     if not kaizen:
         raise HTTPException(status_code=404, detail="Kaizen non trovato")
