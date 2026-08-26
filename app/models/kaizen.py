@@ -49,6 +49,11 @@ class KaizenCreate(BaseModel):
 
     # Pillar di appartenenza
     pillar_id: Optional[str] = None
+    pillar_sigla: Optional[str] = None
+    pillar_label: Optional[str] = None
+    pillar_ids: List[str] = []
+    pillar_nomi: List[str] = []
+    pillar_sigle: List[str] = []
 
     # 🆕 Meeting/Dashboard di origine (Kaizen nato da un PCS Daily, Steering, ecc.)
     dashboard_id: Optional[str] = None
@@ -91,6 +96,11 @@ class KaizenUpdate(BaseModel):
 
     # Pillar di appartenenza
     pillar_id: Optional[str] = None
+    pillar_sigla: Optional[str] = None
+    pillar_label: Optional[str] = None
+    pillar_ids: Optional[List[str]] = None
+    pillar_nomi: Optional[List[str]] = None
+    pillar_sigle: Optional[List[str]] = None
 
     # 🆕 Meeting/Dashboard
     dashboard_id: Optional[str] = None
