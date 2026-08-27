@@ -236,21 +236,24 @@ async def create_kaizen(kaizen: KaizenCreate):
 
 @router.put("/{kaizen_id}")
 async def update_kaizen(kaizen_id: str, update: KaizenUpdate):
-    update_data = {k: v for k, v in update.dict().items() if v is not None}
-    update_data["updated_at"] = datetime.now(timezone.utc)
-
-    feed_entry = {
-        "utente": "Default User",
-        "azione": "Kaizen aggiornato",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+    update_data = {
+        key: value
+        for key, value in update.model_dump(exclude_none=True).items()
+        if key != "feed"
     }
+    update_data["updated_at"] = datetime.now(timezone.utc)
 
     result = await db.kaizens.update_one(
         {"_id": ObjectId(kaizen_id)},
-        {"$set": update_data, "$push": {"feed": feed_entry}},
+        {"$set": update_data},
     )
+
     if result.matched_count == 0:
-        raise HTTPException(status_code=404, detail="Kaizen non trovato")
+        raise HTTPException(
+            status_code=404,
+            detail="Kaizen non trovato"
+        )
+
     return {"message": "Kaizen aggiornato"}
 
 
