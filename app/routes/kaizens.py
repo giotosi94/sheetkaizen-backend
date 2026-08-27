@@ -9,9 +9,6 @@ from typing import Optional
 router = APIRouter()
 
 
-# ============================================================
-# UTILS
-# ============================================================
 def get_prefix(livello: str) -> str:
     if livello == "Quick":
         return "QK"
@@ -60,9 +57,6 @@ def serialize(doc: dict) -> dict:
     return doc
 
 
-# ============================================================
-# LIST + DETAIL
-# ============================================================
 @router.get("/")
 async def get_kaizens(
     livello: Optional[str] = Query(None),
@@ -101,15 +95,11 @@ async def get_kaizen(kaizen_id: str):
     return serialize(kaizen)
 
 
-# ============================================================
-# CREATE — fix creator/team dal payload
-# ============================================================
 @router.post("/")
 async def create_kaizen(kaizen: KaizenCreate):
     livello = normalize_livello(kaizen.livello, kaizen.tipo)
     numero = await get_next_numero(livello)
 
-    # Validazione gerarchia
     if kaizen.parent_kaizen_id:
         parent = await db.kaizens.find_one({"_id": ObjectId(kaizen.parent_kaizen_id)})
         if not parent:
@@ -121,7 +111,6 @@ async def create_kaizen(kaizen: KaizenCreate):
                 detail="Un Quick Kaizen non può essere genitore di altri Kaizen"
             )
 
-    # 🆕 Prendi il creatore dal payload (fallback se mancante)
     creatore_id = kaizen.creatore_id or "default"
     creatore_nome = kaizen.creatore_nome or "Default User"
 
@@ -131,55 +120,50 @@ async def create_kaizen(kaizen: KaizenCreate):
         "livello": livello,
         "tipo": kaizen.tipo or f"{livello} Kaizen",
         "stato": "Aperto",
-
-        # 🆕 Creator dal payload
         "creatore_id": creatore_id,
         "creatore_nome": creatore_nome,
-
-        # 🆕 Team Leader
         "team_leader_id": kaizen.team_leader_id,
         "team_leader_nome": kaizen.team_leader_nome,
-
-        # 🆕 Team Members
         "team_members_ids": kaizen.team_members_ids or [],
         "team_members_nomi": kaizen.team_members_nomi or [],
-
-        # Team legacy
         "team": kaizen.team,
         "partecipanti": kaizen.partecipanti or [],
-
         "reparto": kaizen.reparto,
         "linea": kaizen.linea,
         "macchina": kaizen.macchina,
         "posto": kaizen.posto,
         "attrezzatura": kaizen.attrezzatura,
         "hashtag": kaizen.hashtag or [],
-
-        # Gerarchia
         "parent_kaizen_id": kaizen.parent_kaizen_id,
         "children_kaizen_ids": [],
-
-        # Tipo perdita + categoria
         "tipo_perdita": kaizen.tipo_perdita,
         "categoria": kaizen.categoria,
-
-        # Pillar
         "pillar_id": kaizen.pillar_id,
-
-        # 🆕 Meeting/Dashboard
+        "pillar_sigla": kaizen.pillar_sigla,
+        "pillar_label": kaizen.pillar_label,
+        "pillar_ids": kaizen.pillar_ids or [],
+        "pillar_nomi": kaizen.pillar_nomi or [],
+        "pillar_sigle": kaizen.pillar_sigle or [],
         "dashboard_id": kaizen.dashboard_id,
         "dashboard_nome": kaizen.dashboard_nome,
-
         "data_apertura": datetime.now(timezone.utc),
         "data_chiusura": None,
         "passo1_definizione": {
             "immagini": [],
-            "che_cosa": "", "dove": "", "quando": "",
-            "chi": "", "quale": "", "come": "",
+            "che_cosa": "",
+            "dove": "",
+            "quando": "",
+            "chi": "",
+            "quale": "",
+            "come": "",
         },
         "passo2_cause_probabili": {
-            "people": [], "environment": [], "material": [],
-            "measurement": [], "methods": [], "machine": [],
+            "people": [],
+            "environment": [],
+            "material": [],
+            "measurement": [],
+            "methods": [],
+            "machine": [],
             "effetto": "",
         },
         "passo3_causa_radice": {
@@ -198,8 +182,11 @@ async def create_kaizen(kaizen: KaizenCreate):
         },
         "passo4_piani_azione": [],
         "fase5_valutazione_efficacia": {"osservazioni": "", "efficace": ""},
-        "fase6_standardizzazione": {"osservazioni": "", "standard_creati": [], "replicato_su": []},
-
+        "fase6_standardizzazione": {
+            "osservazioni": "",
+            "standard_creati": [],
+            "replicato_su": [],
+        },
         "standard_elements": None,
         "countermeasure_ladder": None,
         "step1_kpi_definition": None,
@@ -209,22 +196,21 @@ async def create_kaizen(kaizen: KaizenCreate):
         "step5_close_the_loop": None,
         "gantt": None,
         "cost_benefit": None,
-
-        "lavagna": "",
+        "lavagna": kaizen.lavagna or "",
+        "lavagna_immagini": kaizen.lavagna_immagini or [],
+        "lavagna_documenti": kaizen.lavagna_documenti or [],
         "feed": [{
             "utente": creatore_nome,
             "azione": f"{livello} Kaizen creato",
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }],
         "campi_custom": {},
-
         "livello_storia": [{
             "livello": livello,
             "quando": datetime.now(timezone.utc).isoformat(),
             "utente": creatore_nome,
             "motivo": "Creazione iniziale",
         }],
-
         "created_at": datetime.now(timezone.utc),
         "updated_at": datetime.now(timezone.utc),
     }
@@ -234,16 +220,20 @@ async def create_kaizen(kaizen: KaizenCreate):
     if kaizen.parent_kaizen_id:
         await db.kaizens.update_one(
             {"_id": ObjectId(kaizen.parent_kaizen_id)},
-            {"$push": {"children_kaizen_ids": str(result.inserted_id)},
-             "$set": {"updated_at": datetime.now(timezone.utc)}}
+            {
+                "$push": {"children_kaizen_ids": str(result.inserted_id)},
+                "$set": {"updated_at": datetime.now(timezone.utc)},
+            }
         )
 
-    return {"id": str(result.inserted_id), "numero": numero, "livello": livello, "message": "Kaizen creato"}
+    return {
+        "id": str(result.inserted_id),
+        "numero": numero,
+        "livello": livello,
+        "message": "Kaizen creato",
+    }
 
 
-# ============================================================
-# UPDATE
-# ============================================================
 @router.put("/{kaizen_id}")
 async def update_kaizen(kaizen_id: str, update: KaizenUpdate):
     update_data = {k: v for k, v in update.dict().items() if v is not None}
@@ -264,9 +254,6 @@ async def update_kaizen(kaizen_id: str, update: KaizenUpdate):
     return {"message": "Kaizen aggiornato"}
 
 
-# ============================================================
-# CHANGE METHODOLOGY
-# ============================================================
 @router.patch("/{kaizen_id}/change-methodology")
 async def change_methodology(kaizen_id: str, payload: ChangeMethodologyPayload):
     kaizen = await db.kaizens.find_one({"_id": ObjectId(kaizen_id)})
@@ -286,7 +273,7 @@ async def change_methodology(kaizen_id: str, payload: ChangeMethodologyPayload):
         return {
             "message": f"Il Kaizen è già {nuovo_livello}",
             "nuovo_livello": nuovo_livello,
-            "no_change": True
+            "no_change": True,
         }
 
     if nuovo_livello == "Quick":
@@ -320,7 +307,10 @@ async def change_methodology(kaizen_id: str, payload: ChangeMethodologyPayload):
                 "tipo": f"{nuovo_livello} Kaizen",
                 "updated_at": datetime.now(timezone.utc),
             },
-            "$push": {"livello_storia": storia_entry, "feed": feed_entry},
+            "$push": {
+                "livello_storia": storia_entry,
+                "feed": feed_entry,
+            },
         }
     )
 
@@ -331,9 +321,6 @@ async def change_methodology(kaizen_id: str, payload: ChangeMethodologyPayload):
     }
 
 
-# ============================================================
-# LEGACY promote/demote
-# ============================================================
 @router.patch("/{kaizen_id}/promote")
 async def promote_kaizen_legacy(kaizen_id: str, payload: PromotePayload):
     kaizen = await db.kaizens.find_one({"_id": ObjectId(kaizen_id)})
@@ -347,7 +334,10 @@ async def promote_kaizen_legacy(kaizen_id: str, payload: PromotePayload):
     if not nuovo_livello:
         raise HTTPException(status_code=400, detail="Già al livello massimo")
 
-    change_payload = ChangeMethodologyPayload(nuovo_livello=nuovo_livello, motivo=payload.motivo)
+    change_payload = ChangeMethodologyPayload(
+        nuovo_livello=nuovo_livello,
+        motivo=payload.motivo,
+    )
     return await change_methodology(kaizen_id, change_payload)
 
 
@@ -364,13 +354,13 @@ async def demote_kaizen_legacy(kaizen_id: str, payload: PromotePayload):
     if not nuovo_livello:
         raise HTTPException(status_code=400, detail="Già al livello minimo")
 
-    change_payload = ChangeMethodologyPayload(nuovo_livello=nuovo_livello, motivo=payload.motivo)
+    change_payload = ChangeMethodologyPayload(
+        nuovo_livello=nuovo_livello,
+        motivo=payload.motivo,
+    )
     return await change_methodology(kaizen_id, change_payload)
 
 
-# ============================================================
-# GERARCHIA — Children + Link/Unlink
-# ============================================================
 @router.get("/{kaizen_id}/children")
 async def get_children(kaizen_id: str):
     kaizen = await db.kaizens.find_one({"_id": ObjectId(kaizen_id)})
@@ -408,12 +398,19 @@ async def link_child(kaizen_id: str, payload: LinkChildPayload):
 
     await db.kaizens.update_one(
         {"_id": ObjectId(kaizen_id)},
-        {"$addToSet": {"children_kaizen_ids": payload.child_kaizen_id},
-         "$set": {"updated_at": datetime.now(timezone.utc)}}
+        {
+            "$addToSet": {"children_kaizen_ids": payload.child_kaizen_id},
+            "$set": {"updated_at": datetime.now(timezone.utc)},
+        }
     )
     await db.kaizens.update_one(
         {"_id": ObjectId(payload.child_kaizen_id)},
-        {"$set": {"parent_kaizen_id": kaizen_id, "updated_at": datetime.now(timezone.utc)}}
+        {
+            "$set": {
+                "parent_kaizen_id": kaizen_id,
+                "updated_at": datetime.now(timezone.utc),
+            }
+        }
     )
 
     return {"message": "Kaizen figlio collegato"}
@@ -423,34 +420,45 @@ async def link_child(kaizen_id: str, payload: LinkChildPayload):
 async def unlink_child(kaizen_id: str, child_id: str):
     await db.kaizens.update_one(
         {"_id": ObjectId(kaizen_id)},
-        {"$pull": {"children_kaizen_ids": child_id},
-         "$set": {"updated_at": datetime.now(timezone.utc)}}
+        {
+            "$pull": {"children_kaizen_ids": child_id},
+            "$set": {"updated_at": datetime.now(timezone.utc)},
+        }
     )
     await db.kaizens.update_one(
         {"_id": ObjectId(child_id)},
-        {"$set": {"parent_kaizen_id": None, "updated_at": datetime.now(timezone.utc)}}
+        {
+            "$set": {
+                "parent_kaizen_id": None,
+                "updated_at": datetime.now(timezone.utc),
+            }
+        }
     )
     return {"message": "Kaizen figlio scollegato"}
 
 
-# ============================================================
-# ACTION PLAN — Lista AP collegati al Kaizen
-# ============================================================
 @router.get("/{kaizen_id}/action-plans")
 async def get_kaizen_action_plans(kaizen_id: str):
     plans = []
     cursor = db.action_plans.find({
         "kaizen_id": kaizen_id,
-        "is_active": {"$ne": False}
+        "is_active": {"$ne": False},
     }).sort("created_at", -1)
+
     async for p in cursor:
         p["_id"] = str(p["_id"])
         plans.append(p)
 
     cursor = db.action_plans.find({
-        "links": {"$elemMatch": {"entity_type": "kaizen", "entity_id": kaizen_id}},
-        "is_active": {"$ne": False}
+        "links": {
+            "$elemMatch": {
+                "entity_type": "kaizen",
+                "entity_id": kaizen_id,
+            }
+        },
+        "is_active": {"$ne": False},
     }).sort("created_at", -1)
+
     async for p in cursor:
         p_id = str(p["_id"])
         if not any(existing["_id"] == p_id for existing in plans):
@@ -460,11 +468,11 @@ async def get_kaizen_action_plans(kaizen_id: str):
     return plans
 
 
-# ============================================================
-# DELETE
-# ============================================================
 @router.delete("/{kaizen_id}")
-async def delete_kaizen(kaizen_id: str, current_user: dict = Depends(require_admin)):
+async def delete_kaizen(
+    kaizen_id: str,
+    current_user: dict = Depends(require_admin),
+):
     kaizen = await db.kaizens.find_one({"_id": ObjectId(kaizen_id)})
     if not kaizen:
         raise HTTPException(status_code=404, detail="Kaizen non trovato")
