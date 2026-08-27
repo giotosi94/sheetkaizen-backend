@@ -54,6 +54,8 @@ class KaizenCreate(BaseModel):
     pillar_ids: List[str] = []
     pillar_nomi: List[str] = []
     pillar_sigle: List[str] = []
+    lavagna_immagini: List[str] = []
+    lavagna_documenti: List[Dict[str, Any]] = []
 
     # 🆕 Meeting/Dashboard di origine (Kaizen nato da un PCS Daily, Steering, ecc.)
     dashboard_id: Optional[str] = None
@@ -120,6 +122,8 @@ class KaizenUpdate(BaseModel):
     fase5_valutazione_efficacia: Optional[Dict[str, Any]] = None
     fase6_standardizzazione: Optional[Dict[str, Any]] = None
     lavagna: Optional[str] = None
+    lavagna_immagini: Optional[List[str]] = None
+    lavagna_documenti: Optional[List[Dict[str, Any]]] = None
     campi_custom: Optional[Dict[str, Any]] = None
 
     # Sezioni speciali Standard/Major
