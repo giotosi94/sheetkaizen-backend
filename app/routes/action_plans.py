@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException, Query, Depends
 from app.database import db
 from app.middleware.auth import get_current_user
+from app.services.email_service import send_action_plan_mention_email
 from app.models.action_plan import (
     ActionPlanCreate, ActionPlanUpdate, ChecklistItem, Commento, Allegato, LinkEntita
 )
@@ -717,8 +718,56 @@ async def add_commento(
 
         notifications.append(notification)
 
+    notification_ids = []
+
     if notifications:
-        await db.notifications.insert_many(notifications)
+        notification_result = await db.notifications.insert_many(
+            notifications
+        )
+        notification_ids = notification_result.inserted_ids
+
+    for index, mention in enumerate(mentions):
+        if index >= len(notification_ids):
+            continue
+
+        notification_id = notification_ids[index]
+
+        try:
+            email_result = await send_action_plan_mention_email(
+                recipient_email=mention.get("email"),
+                recipient_name=mention.get("name"),
+                author_name=autore,
+                action_plan_id=plan_id,
+                action_plan_number=ap.get("numero"),
+                action_plan_title=ap.get("titolo"),
+                comment_text=testo,
+            )
+
+            await db.notifications.update_one(
+                {"_id": notification_id},
+                {
+                    "$set": {
+                        "email_status": email_result["status"],
+                        "email_detail": email_result["detail"],
+                        "email_sent_at": (
+                            datetime.now(timezone.utc)
+                            if email_result["status"] == "sent"
+                            else None
+                        ),
+                    }
+                },
+            )
+        except Exception as email_error:
+            await db.notifications.update_one(
+                {"_id": notification_id},
+                {
+                    "$set": {
+                        "email_status": "failed",
+                        "email_detail": str(email_error)[:500],
+                        "email_failed_at": datetime.now(timezone.utc),
+                    }
+                },
+            )
 
     return {
         "message": "Commento aggiunto",
