@@ -1,5 +1,6 @@
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
 from app.database import db
+from app.middleware.auth import get_current_user
 from app.models.action_plan import (
     ActionPlanCreate, ActionPlanUpdate, ChecklistItem, Commento, Allegato, LinkEntita
 )
@@ -563,48 +564,167 @@ async def update_action_plan(plan_id: str, update: ActionPlanUpdate):
 # COMMENTI
 # ============================================================
 @router.post("/{plan_id}/commenti")
-async def add_commento(plan_id: str, payload: dict):
+async def add_commento(
+    plan_id: str,
+    payload: dict,
+    current_user: dict = Depends(get_current_user),
+):
     testo = payload.get("testo", "").strip()
-    autore = payload.get("autore", "Default User")
+
     if not testo:
-        raise HTTPException(status_code=400, detail="Testo commento mancante")
-    
-    ap = await db.action_plans.find_one({"_id": ObjectId(plan_id)})
-    if ap and await is_ap_locked(ap):
-        raise HTTPException(status_code=403, detail="Action Plan chiuso. Riaprilo per aggiungere commenti.")
-    
-    mentions, tags = extract_mentions_and_tags(testo)
-    
+        raise HTTPException(
+            status_code=400,
+            detail="Testo commento mancante",
+        )
+
+    try:
+        plan_object_id = ObjectId(plan_id)
+    except Exception:
+        raise HTTPException(
+            status_code=400,
+            detail="Action Plan ID non valido",
+        )
+
+    ap = await db.action_plans.find_one({"_id": plan_object_id})
+
+    if not ap:
+        raise HTTPException(
+            status_code=404,
+            detail="Action Plan non trovato",
+        )
+
+    if await is_ap_locked(ap):
+        raise HTTPException(
+            status_code=403,
+            detail="Action Plan chiuso. Riaprilo per aggiungere commenti.",
+        )
+
+    autore_id = str(current_user["_id"])
+    autore = (
+        current_user.get("full_name")
+        or current_user.get("username")
+        or current_user.get("email")
+        or "Utente"
+    )
+    autore_email = current_user.get("email")
+
+    payload_mentions = payload.get("mentions") or []
+    mentions = []
+    seen_user_ids = set()
+
+    for mention in payload_mentions:
+        if not isinstance(mention, dict):
+            continue
+
+        user_id = mention.get("user_id")
+
+        if not user_id:
+            continue
+
+        if user_id == autore_id:
+            continue
+
+        if user_id in seen_user_ids:
+            continue
+
+        try:
+            mentioned_user = await db.users.find_one({
+                "_id": ObjectId(user_id),
+                "is_active": {"$ne": False},
+            })
+        except Exception:
+            mentioned_user = None
+
+        if not mentioned_user:
+            continue
+
+        seen_user_ids.add(user_id)
+
+        mentions.append({
+            "user_id": str(mentioned_user["_id"]),
+            "name": (
+                mentioned_user.get("full_name")
+                or mentioned_user.get("username")
+                or mentioned_user.get("email")
+            ),
+            "email": mentioned_user.get("email"),
+        })
+
+    commento_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc)
+
     commento = {
-        "id": str(uuid.uuid4()),
+        "id": commento_id,
+        "autore_id": autore_id,
         "autore": autore,
-        "autore_avatar": payload.get("autore_avatar"),
+        "autore_email": autore_email,
+        "autore_avatar": current_user.get("foto_url"),
         "testo": testo,
         "mentions": mentions,
-        "timestamp": datetime.now(timezone.utc),
+        "timestamp": now,
         "edited_at": None,
         "reactions": [],
     }
-    
+
     feed_entry = {
         "id": str(uuid.uuid4()),
+        "utente_id": autore_id,
         "utente": autore,
         "azione": "Commento aggiunto",
         "tipo_evento": "comment",
-        "timestamp": datetime.now(timezone.utc),
+        "timestamp": now,
     }
-    
-    result = await db.action_plans.update_one(
-        {"_id": ObjectId(plan_id)},
+
+    await db.action_plans.update_one(
+        {"_id": plan_object_id},
         {
-            "$push": {"commenti": commento, "feed": feed_entry},
-            "$addToSet": {"mentions": {"$each": mentions}, "tags": {"$each": tags}},
-            "$set": {"updated_at": datetime.now(timezone.utc)},
+            "$push": {
+                "commenti": commento,
+                "feed": feed_entry,
+            },
+            "$set": {
+                "updated_at": now,
+            },
         },
     )
-    if result.matched_count == 0:
-        raise HTTPException(status_code=404, detail="AP non trovato")
-    return {"message": "Commento aggiunto", "commento": commento}
+
+    notifications = []
+
+    for mention in mentions:
+        notification = {
+            "user_id": mention["user_id"],
+            "type": "action_plan_mention",
+            "title": "Sei stato menzionato in un Action Plan",
+            "message": (
+                f"{autore} ti ha menzionato in "
+                f"{ap.get('numero', 'un Action Plan')}"
+            ),
+            "entity_type": "action_plan",
+            "entity_id": plan_id,
+            "entity_label": ap.get("numero"),
+            "entity_title": ap.get("titolo"),
+            "comment_id": commento_id,
+            "comment_text": testo,
+            "created_by_id": autore_id,
+            "created_by_name": autore,
+            "action_url": f"/action-plan?open={plan_id}",
+            "is_read": False,
+            "read_at": None,
+            "email_status": "pending" if mention.get("email") else "not_available",
+            "email_address": mention.get("email"),
+            "created_at": now,
+        }
+
+        notifications.append(notification)
+
+    if notifications:
+        await db.notifications.insert_many(notifications)
+
+    return {
+        "message": "Commento aggiunto",
+        "commento": commento,
+        "notifications_created": len(notifications),
+    }
 
 
 @router.delete("/{plan_id}/commenti/{commento_id}")
