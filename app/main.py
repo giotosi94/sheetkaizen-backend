@@ -42,5 +42,7 @@ app.include_router(pillars.router, prefix="/api/pillars", tags=["Pillars"])
 app.include_router(skill_matrix.router, prefix="/api", tags=["skill_matrix"])
 app.include_router(pillar_folders.router, prefix="/api", tags=["Pillar Folders"])
 app.include_router(opl_setup.router, prefix="/api/setup", tags=["Setup"])
+from app.routes import opl_letture
+app.include_router(opl_letture.router, prefix="/api/opl-letture", tags=["OPL Letture"])
 app.include_router(notifications.router, prefix="/api/notifications", tags=["Notifications"],
 )
