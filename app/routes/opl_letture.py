@@ -41,7 +41,8 @@ class PubblicaPayload(BaseModel):
     scadenza: Optional[str] = None
 
 
-async def _risolvi_destinatari(payload: PubblicaPayload) -> Listquery_or = []
+async def _risolvi_destinatari(payload: PubblicaPayload) -> list:
+    query_or = []
 
     if payload.user_ids:
         ids = []
