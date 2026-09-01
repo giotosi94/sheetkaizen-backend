@@ -1,1974 +1,425 @@
-import React, { useState, useEffect, useRef } from 'react'
-import api from '../services/api'
-import { FileText, Upload, Download, Search, Trash2, Edit2, X, Plus, Pencil, Send, BarChart3 } from 'lucide-react'
-import OplImageEditor from '../components/opl/OplImageEditor'
-import { OPL_SYMBOLS } from '../components/opl/oplSymbols'
-import OplPublishModal from '../components/opl/OplPublishModal'
-import OplReadReportModal from '../components/opl/OplReadReportModal'
+from datetime import datetime, timezone
+import hashlib
+import json
+from typing import List, Optional
 
-const API_BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+from bson import ObjectId
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 
-const CATEGORIE = ['Operativa', 'Sicurezza', 'Manutenzione', 'Qualità', 'Pulizia', 'Allergeni', 'Avvio/Spegnimento']
-const STATI = ['Bozza', 'In Revisione', 'Approvato', 'Obsoleto']
+from app.database import db
+from app.middleware.auth import get_current_user
 
-function getFileType(filename) {
-  if (!filename) return 'unknown'
-  const ext = filename.split('.').pop().toLowerCase()
-  if (['pdf'].includes(ext)) return 'pdf'
-  if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp'].includes(ext)) return 'image'
-  if (['xlsx', 'xls', 'docx', 'doc', 'pptx', 'ppt'].includes(ext)) return 'office'
-  if (['txt', 'csv', 'log', 'json', 'xml'].includes(ext)) return 'text'
-  return 'unknown'
-}
+router = APIRouter()
 
-export default function DocumentiPage() {
-  const [documenti, setDocumenti] = useState([])
-  const [stats, setStats] = useState({})
-  const [search, setSearch] = useState('')
-  const [filterTipo, setFilterTipo] = useState('')
-  const [filterCategoria, setFilterCategoria] = useState('')
-  const [filterStato, setFilterStato] = useState('')
-  const [uploadOpen, setUploadOpen] = useState(false)
-  const [editingDoc, setEditingDoc] = useState(null)
-  const [previewDoc, setPreviewDoc] = useState(null)
-  const [bulkOpen, setBulkOpen] = useState(false)
-  const [oplNativaOpen, setOplNativaOpen] = useState(false)
-  const [publishingDoc, setPublishingDoc] = useState(null)
-  const [reportDoc, setReportDoc] = useState(null)
 
-  useEffect(() => { load() }, [filterTipo, filterCategoria, filterStato])
+def _object_id(value: str, label: str = "ID") -> ObjectId:
+    if not ObjectId.is_valid(value):
+        raise HTTPException(status_code=400, detail=f"{label} non valido")
+    return ObjectId(value)
 
-  const load = async () => {
-    try {
-      const params = {}
-      if (filterTipo) params.tipo = filterTipo
-      if (filterCategoria) params.categoria = filterCategoria
-      if (filterStato) params.stato = filterStato
-      if (search) params.search = search
-      const res = await api.get('/documenti', { params })
-      setDocumenti(res.data)
-      const statsRes = await api.get('/documenti/stats/summary')
-      setStats(statsRes.data)
-    } catch (err) { console.error(err) }
-  }
 
-  const handleSearch = () => load()
+def _utc_datetime(value):
+    if not value:
+        return None
 
-  const deleteDoc = async (id) => {
-    if (!confirm('Vuoi davvero eliminare questo documento?')) return
-    try {
-      await api.delete(`/documenti/${id}`)
-      load()
-    } catch (err) { console.error(err) }
-  }
+    if isinstance(value, str):
+        try:
+            normalized = value.replace("Z", "+00:00")
+            value = datetime.fromisoformat(normalized)
+        except ValueError:
+            return None
 
-  const getStatoBadge = (stato) => {
-    const colors = {
-      'Bozza': 'bg-gray-100 text-gray-700',
-      'In Revisione': 'bg-yellow-100 text-yellow-700',
-      'Approvato': 'bg-green-100 text-green-700',
-      'Obsoleto': 'bg-red-100 text-red-700',
+    if not isinstance(value, datetime):
+        return None
+
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+
+    return value.astimezone(timezone.utc)
+
+
+def _iso_datetime(value):
+    normalized = _utc_datetime(value)
+    return normalized.isoformat() if normalized else None
+
+
+def _current_user_id(current_user: dict) -> str:
+    value = current_user.get("_id") or current_user.get("id")
+    if not value:
+        raise HTTPException(status_code=401, detail="Utente autenticato non valido")
+    return str(value)
+
+
+def _hash_versione(doc: dict) -> str:
+    base = {
+        "numero": doc.get("numero"),
+        "versione": doc.get("versione", 1),
+        "file_id": doc.get("file_id"),
+        "opl_data": doc.get("opl_data"),
+        "titolo": doc.get("titolo"),
     }
-    return colors[stato] || 'bg-gray-100 text-gray-700'
-  }
+    raw = json.dumps(base, sort_keys=True, default=str, ensure_ascii=False)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
-  const getTipoIcon = (tipo) => {
-    return tipo === 'OPL' ? '📋' : tipo === 'SOP' ? '📑' : '📄'
-  }
 
-  return (
-    <div>
-      <div className="flex justify-between items-center mb-6">
-        <h1 className="text-2xl font-bold text-gray-800">Document Manager (OPL / SOP)</h1>
-        <div className="flex gap-2">
-          <button
-            onClick={() => setOplNativaOpen(true)}
-            className="bg-yellow-500 text-white px-4 py-2 rounded-lg flex items-center gap-2 hover:bg-yellow-600 font-medium"
-          >
-            <Plus size={18} /> Nuova OPL Nativa
-          </button>
-          <button
-            onClick={() => setBulkOpen(true)}
-            className="bg-green-600 text-white px-4 py-2 rounded-lg flex items-center gap-2 hover:bg-green-700"
-          >
-            Bulk Upload
-          </button>
-          <button
-            onClick={() => setUploadOpen(true)}
-            className="bg-primary text-white px-4 py-2 rounded-lg flex items-center gap-2 hover:bg-primary-light"
-          >
-            <Upload size={18} /> Carica Singolo
-          </button>
-        </div>
-      </div>
+def _serialize_lettura(lettura: dict) -> dict:
+    result = dict(lettura)
+    result["_id"] = str(result["_id"])
+    result["assigned_at"] = _iso_datetime(result.get("assigned_at"))
+    result["confirmed_at"] = _iso_datetime(result.get("confirmed_at"))
+    result["scadenza"] = _iso_datetime(result.get("scadenza"))
+    return result
 
-      <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
-        {['OPL', 'SOP'].map(tipo => {
-          const total = Object.values(stats[tipo] || {}).reduce((s, n) => s + n, 0)
-          const approvati = (stats[tipo] || {})['Approvato'] || 0
-          return (
-            <div key={tipo} className="bg-white rounded-xl shadow p-5">
-              <div className="text-3xl mb-2">{getTipoIcon(tipo)}</div>
-              <p className="text-sm text-gray-500">{tipo === 'OPL' ? 'One Point Lessons' : 'Standard Operating Procedures'}</p>
-              <p className="text-2xl font-bold">{total} documenti</p>
-              <p className="text-xs text-green-600 mt-1">{approvati} approvati</p>
-            </div>
-          )
-        })}
-      </div>
 
-      <div className="bg-white rounded-xl shadow p-4 mb-4">
-        <div className="grid grid-cols-1 md:grid-cols-5 gap-3">
-          <div className="relative">
-            <Search className="absolute left-3 top-2.5 text-gray-400" size={16} />
-            <input
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
-              placeholder="Cerca per titolo o numero..."
-              className="w-full pl-9 pr-3 py-2 border rounded-lg text-sm"
-            />
-          </div>
-          <select value={filterTipo} onChange={(e) => setFilterTipo(e.target.value)} className="border rounded-lg px-3 py-2 text-sm">
-            <option value="">Tutti i tipi</option>
-            <option>OPL</option>
-            <option>SOP</option>
-            <option>Procedura</option>
-            <option>Istruzione</option>
-          </select>
-          <select value={filterCategoria} onChange={(e) => setFilterCategoria(e.target.value)} className="border rounded-lg px-3 py-2 text-sm">
-            <option value="">Tutte le categorie</option>
-            {CATEGORIE.map(c => <option key={c}>{c}</option>)}
-          </select>
-          <select value={filterStato} onChange={(e) => setFilterStato(e.target.value)} className="border rounded-lg px-3 py-2 text-sm">
-            <option value="">Tutti gli stati</option>
-            {STATI.map(s => <option key={s}>{s}</option>)}
-          </select>
-          <button onClick={handleSearch} className="bg-primary text-white px-4 py-2 rounded-lg flex items-center justify-center gap-2 hover:bg-primary-light">
-            <Search size={16} /> Cerca
-          </button>
-        </div>
-      </div>
+class PubblicaPayload(BaseModel):
+    user_ids: List[str] = Field(default_factory=list)
+    reparti: List[str] = Field(default_factory=list)
+    linee: List[str] = Field(default_factory=list)
+    macchine: List[str] = Field(default_factory=list)
+    ruoli: List[str] = Field(default_factory=list)
+    scadenza: str
 
-      <div className="bg-white rounded-xl shadow overflow-hidden">
-        <table className="w-full text-sm">
-          <thead className="bg-gray-50">
-            <tr className="text-left text-gray-500">
-              <th className="p-4">Numero</th>
-              <th className="p-4">Titolo</th>
-              <th className="p-4">Tipo</th>
-              <th className="p-4">Categoria</th>
-              <th className="p-4">Reparto/Linea</th>
-              <th className="p-4">Versione</th>
-              <th className="p-4">Stato</th>
-              <th className="p-4">Azioni</th>
-            </tr>
-          </thead>
-          <tbody>
-            {documenti.length === 0 ? (
-              <tr><td colSpan="8" className="text-center text-gray-400 py-8">Nessun documento. Caricane uno!</td></tr>
-            ) : (
-              documenti.map(doc => {
-                const handleTableDownload = async () => {
-                  try {
-                    const res = await api.get(`/documenti/${doc._id}/file`, { responseType: 'blob' })
-                    const url = URL.createObjectURL(res.data)
-                    const a = document.createElement('a')
-                    a.href = url
-                    a.download = doc.file_name || 'documento'
-                    document.body.appendChild(a)
-                    a.click()
-                    document.body.removeChild(a)
-                    setTimeout(() => URL.revokeObjectURL(url), 1000)
-                  } catch (err) {
-                    alert('Errore download: ' + (err.response?.data?.detail || err.message))
-                  }
-                }
-                return (
-                  <tr key={doc._id} className="border-t hover:bg-gray-50">
-                    <td className="p-4">
-                      <button
-                        type="button"
-                        onClick={() => setPreviewDoc(doc)}
-                        className="font-mono text-primary font-bold hover:underline hover:text-primary-light"
-                        title="Apri documento"
-                      >
-                        {doc.numero}
-                      </button>
-                    </td>
-                    <td className="p-4">
-                      <div className="flex items-center gap-2">
-                        <span>{getTipoIcon(doc.tipo)}</span>
-                        <div>
-                          <div className="font-medium">{doc.titolo}</div>
-                          {doc.descrizione && <div className="text-xs text-gray-500 truncate max-w-xs">{doc.descrizione}</div>}
-                        </div>
-                      </div>
-                    </td>
-                    <td className="p-4">{doc.tipo}</td>
-                    <td className="p-4">{doc.categoria || '-'}</td>
-                    <td className="p-4 text-xs">
-                      {doc.reparto && <div>{doc.reparto}</div>}
-                      {doc.linea && <div>{doc.linea}</div>}
-                    </td>
-                    <td className="p-4">
-                      <span className="bg-blue-100 text-blue-700 px-2 py-1 rounded text-xs">v{doc.versione || 1}</span>
-                    </td>
-                    <td className="p-4">
-                      <span className={`px-2 py-1 rounded-full text-xs font-medium ${getStatoBadge(doc.stato)}`}>
-                        {doc.stato}
-                      </span>
-                    </td>
-                    <td className="p-4">
-                      <div className="flex gap-2">
-                        {doc.tipo === 'OPL' && !doc.pubblicata && (
-                          <button
-                            type="button"
-                            onClick={() => setPublishingDoc(doc)}
-                            className="text-purple-600 hover:bg-purple-50 p-1 rounded"
-                            title="Pubblica e assegna"
-                          >
-                            <Send size={16} />
-                          </button>
-                        )}
-                        {doc.tipo === 'OPL' && doc.pubblicata && (
-                          <button
-                            type="button"
-                            onClick={() => setReportDoc(doc)}
-                            className="text-indigo-600 hover:bg-indigo-50 p-1 rounded"
-                            title="Report letture"
-                          >
-                            <BarChart3 size={16} />
-                          </button>
-                        )}
-                        <button onClick={handleTableDownload} className="text-green-600 hover:bg-green-50 p-1 rounded" title="Scarica">
-                          <Download size={16} />
-                        </button>
-                        <button onClick={() => setEditingDoc(doc)} className="text-yellow-600 hover:bg-yellow-50 p-1 rounded" title="Modifica">
-                          <Edit2 size={16} />
-                        </button>
-                        <button onClick={() => deleteDoc(doc._id)} className="text-red-600 hover:bg-red-50 p-1 rounded" title="Elimina">
-                          <Trash2 size={16} />
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                )
-              })
-            )}
-          </tbody>
-        </table>
-      </div>
 
-      {uploadOpen && <UploadModal onClose={() => setUploadOpen(false)} onSaved={load} />}
-      {editingDoc && <EditModal doc={editingDoc} onClose={() => setEditingDoc(null)} onSaved={load} />}
-      {previewDoc && <PreviewModal doc={previewDoc} onClose={() => setPreviewDoc(null)} />}
-      {bulkOpen && <BulkUploadModal onClose={() => setBulkOpen(false)} onSaved={load} />}
-      {oplNativaOpen && <OplNativaModal onClose={() => setOplNativaOpen(false)} onSaved={load} />}
-      {publishingDoc && (
-        <OplPublishModal
-          documento={publishingDoc}
-          onClose={() => setPublishingDoc(null)}
-          onPublished={load}
-        />
-      )}
-      {reportDoc && (
-        <OplReadReportModal
-          documento={reportDoc}
-          onClose={() => setReportDoc(null)}
-        />
-      )}
-    </div>
-  )
-}
+class ConfermaPayload(BaseModel):
+    confirmation_text: str = "Confermo di aver letto e compreso"
 
-// ─────────────────────────────────────────────────────────────
-// PREVIEW MODAL
-// ─────────────────────────────────────────────────────────────
 
-function PreviewModal({ doc, onClose }) {
-  const fileType = getFileType(doc.file_name)
-  const [blobUrl, setBlobUrl] = useState(null)
-  const [textContent, setTextContent] = useState('')
-  const [officeViewerUrl, setOfficeViewerUrl] = useState(null)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState(null)
+async def _risolvi_destinatari(payload: PubblicaPayload) -> list:
+    query_or = []
 
-  // Bottone Scarica: genera al volo un blob e forza il download (con JWT)
-  async function handleDownload() {
-    try {
-      const res = await api.get(`/documenti/${doc._id}/file`, { responseType: 'blob' })
-      const url = URL.createObjectURL(res.data)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = doc.file_name || 'documento'
-      document.body.appendChild(a)
-      a.click()
-      document.body.removeChild(a)
-      setTimeout(() => URL.revokeObjectURL(url), 1000)
-    } catch (err) {
-      alert('Errore download: ' + (err.response?.data?.detail || err.message))
-    }
-  }
+    valid_user_ids = [ObjectId(value) for value in payload.user_ids if ObjectId.is_valid(value)]
+    if valid_user_ids:
+        query_or.append({"_id": {"$in": valid_user_ids}})
 
-  // Carica il file dal backend (JWT) per anteprima
-  useEffect(() => {
-    let currentUrl = null
-    let cancelled = false
+    if payload.reparti:
+        query_or.append({"reparto": {"$in": payload.reparti}})
 
-    async function loadFile() {
-      if (fileType === 'office') {
-        try {
-          const tokRes = await api.post(`/documenti/${doc._id}/preview-token`)
-          if (cancelled) return
-          const token = tokRes.data.token
-          const ext = (doc.file_name || 'file.xlsx').split('.').pop().toLowerCase()
-          const publicUrl = `${API_BASE}/api/documenti/${doc._id}/preview.${ext}?token=${encodeURIComponent(token)}`
-          const viewerUrl = `https://view.officeapps.live.com/op/embed.aspx?src=${encodeURIComponent(publicUrl)}`
-          setOfficeViewerUrl(viewerUrl)
-          setLoading(false)
-        } catch (err) {
-          if (!cancelled) {
-            setError(err.response?.data?.detail || err.message || 'Errore preview Office')
-            setLoading(false)
-          }
-        }
-        return
-      }
-      const isOplNativaWithImage = doc.formato === 'nativa' && doc.file_id
-      if (fileType !== 'pdf' && fileType !== 'image' && fileType !== 'text' && !isOplNativaWithImage) {
-        setLoading(false)
-        return
-      }
-      try {
-        const res = await api.get(`/documenti/${doc._id}/file`, { responseType: 'blob' })
-        if (cancelled) return
+    if payload.linee:
+        query_or.append({"linee": {"$in": payload.linee}})
 
-        if (fileType === 'text') {
-          const text = await res.data.text()
-          if (!cancelled) {
-            setTextContent(text)
-            setLoading(false)
-          }
-        } else {
-          currentUrl = URL.createObjectURL(res.data)
-          if (!cancelled) {
-            setBlobUrl(currentUrl)
-            setLoading(false)
-          }
-        }
-      } catch (err) {
-        if (!cancelled) {
-          setError(err.response?.data?.detail || err.message || 'Errore caricamento')
-          setLoading(false)
-        }
-      }
+    if payload.macchine:
+        query_or.append({"macchine": {"$in": payload.macchine}})
+
+    if payload.ruoli:
+        query_or.append({"role": {"$in": payload.ruoli}})
+
+    if not query_or:
+        return []
+
+    active_filter = {
+        "$or": [
+            {"is_active": True},
+            {"is_active": {"$exists": False}, "attivo": {"$ne": False}},
+        ]
     }
 
-    loadFile()
+    users = []
+    seen = set()
+    cursor = db.users.find({"$and": [active_filter, {"$or": query_or}]})
 
-    return () => {
-      cancelled = true
-      if (currentUrl) URL.revokeObjectURL(currentUrl)
-    }
-  }, [doc._id, fileType])
+    async for user in cursor:
+        user_id = str(user["_id"])
+        if user_id in seen:
+            continue
+        seen.add(user_id)
+        users.append(user)
 
-  const previewContent = (() => {
-    // OPL Nativa: layout strutturato in stile Lindt
-    if (doc.formato === 'nativa' && doc.opl_data) {
-      return <OplNativaPreview doc={doc} imageBlobUrl={blobUrl} />
-    }
+    return users
 
-    if (loading) {
-      return (
-        <div className="w-full h-full flex items-center justify-center text-gray-500">
-          Caricamento anteprima...
-        </div>
-      )
-    }
 
-    if (error) {
-      return (
-        <div className="w-full h-full flex flex-col items-center justify-center text-gray-500 p-8">
-          <div className="text-6xl mb-4">⚠️</div>
-          <div className="text-lg mb-2 font-medium">Errore caricamento</div>
-          <div className="text-sm text-gray-400 mb-6">{error}</div>
-          <button
-            onClick={handleDownload}
-            className="bg-primary text-white px-5 py-2 rounded-lg hover:bg-primary-light flex items-center gap-2"
-          >
-            <Download size={18} /> Scarica
-          </button>
-        </div>
-      )
-    }
+@router.get("/da-leggere")
+async def opl_da_leggere(current_user: dict = Depends(get_current_user)):
+    user_id = _current_user_id(current_user)
+    items = []
 
-    if (fileType === 'pdf' && blobUrl) {
-      return React.createElement('iframe', {
-        src: blobUrl,
-        className: 'w-full h-full border-0',
-        title: doc.titolo,
-      })
-    }
+    cursor = db.opl_letture.find({
+        "user_id": user_id,
+        "status": "da_leggere",
+    }).sort("assigned_at", -1)
 
-    if (fileType === 'image' && blobUrl) {
-      return (
-        <div className="w-full h-full flex items-center justify-center p-4 overflow-auto">
-          {React.createElement('img', {
-            src: blobUrl,
-            alt: doc.titolo,
-            className: 'max-w-full object-contain block',
-            style: { maxHeight: '70vh' },
-          })}
+    async for lettura in cursor:
+        items.append(_serialize_lettura(lettura))
 
-        </div>
-      )
-    }
-
-    if (fileType === 'text') {
-      return (
-        <pre className="w-full h-full overflow-auto p-6 bg-gray-50 text-sm font-mono whitespace-pre-wrap">
-          {textContent}
-        </pre>
-      )
-    }
-
-    if (fileType === 'office' && officeViewerUrl) {
-      return (
-        <div className="w-full h-full flex flex-col">
-          {React.createElement('iframe', {
-            src: officeViewerUrl,
-            className: 'flex-1 w-full border-0',
-            title: doc.titolo,
-            frameBorder: '0',
-          })}
-          <div className="bg-yellow-50 border-t border-yellow-200 px-4 py-2 text-xs text-yellow-800 flex-shrink-0">
-            Anteprima via Office Online Viewer. Se non si carica in pochi secondi, usa Scarica.
-          </div>
-        </div>
-      )
-    }
-
-    // Fallback per office se il token non è ancora pronto o tipi non supportati
-    const isOffice = fileType === 'office'
-    return (
-      <div className="w-full h-full flex flex-col items-center justify-center text-gray-500 p-8">
-        <div className="text-7xl mb-4">{isOffice ? '📊' : '📄'}</div>
-        <div className="text-lg mb-2 font-medium">
-          {isOffice ? 'Anteprima file Office non disponibile' : 'Anteprima non disponibile'}
-        </div>
-        <div className="text-sm mb-2 text-gray-400">{doc.file_name}</div>
-        {isOffice && (
-          <div className="text-xs mb-6 text-gray-400 max-w-md text-center">
-            I file Excel, Word e PowerPoint richiedono di essere scaricati per essere visualizzati.
-          </div>
-        )}
-        <button
-          onClick={handleDownload}
-          className="bg-primary text-white px-5 py-2 rounded-lg hover:bg-primary-light flex items-center gap-2"
-        >
-          <Download size={18} /> Scarica per visualizzare
-        </button>
-      </div>
-    )
-  })()
-
-  return (
-    <div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-xl w-full max-w-6xl h-[92vh] flex flex-col shadow-2xl">
-        <div className="bg-primary text-white px-6 py-3 rounded-t-xl flex justify-between items-center">
-          <div className="min-w-0">
-            <div className="font-semibold truncate">{doc.numero} - {doc.titolo}</div>
-            <div className="text-xs opacity-80 truncate">
-              {doc.file_name} • v{doc.versione || 1} • {doc.stato}
-              {doc.file_size && ` • ${(doc.file_size / 1024).toFixed(1)} KB`}
-            </div>
-          </div>
-          <div className="flex gap-2 items-center flex-shrink-0">
-            <button
-              onClick={handleDownload}
-              className="bg-white text-primary px-3 py-1.5 rounded text-sm flex items-center gap-1 hover:bg-gray-100"
-            >
-              <Download size={16} /> Scarica
-            </button>
-            <button onClick={onClose} className="hover:bg-primary-light p-1.5 rounded">
-              <X size={20} />
-            </button>
-          </div>
-        </div>
-
-        <div className="flex-1 overflow-hidden bg-gray-100 relative">
-          {previewContent}
-        </div>
-
-        {(doc.descrizione || doc.autore) && (
-          <div className="border-t bg-white px-6 py-2 text-xs text-gray-600 flex gap-4">
-            {doc.autore && <span><strong>Autore:</strong> {doc.autore}</span>}
-            {doc.categoria && <span><strong>Categoria:</strong> {doc.categoria}</span>}
-            {doc.descrizione && <span className="truncate">{doc.descrizione}</span>}
-          </div>
-        )}
-      </div>
-    </div>
-  )
-}
-
-// ─────────────────────────────────────────────────────────────
-// UPLOAD MODAL
-// ─────────────────────────────────────────────────────────────
-
-function UploadModal({ onClose, onSaved }) {
-  const [form, setForm] = useState({
-    titolo: '',
-    tipo: 'OPL',
-    categoria: '',
-    reparto: '',
-    linea: '',
-    macchina: '',
-    autore: '',
-    descrizione: '',
-    tag: '',
-  })
-  const [reparti, setReparti] = useState([])
-  const [file, setFile] = useState(null)
-  const [uploading, setUploading] = useState(false)
-  const [compress, setCompress] = useState(true)
-  const fileRef = useRef(null)
-
-  useEffect(() => {
-    api
-      .get('/reparti/')
-      .then(response => setReparti((response.data || []).filter(reparto => reparto.attivo !== false)))
-      .catch(error => console.error('Errore reparti:', error))
-
-    try {
-      const savedUser = localStorage.getItem('user')
-      if (savedUser) {
-        const user = JSON.parse(savedUser)
-        setForm(current => ({
-          ...current,
-          autore: user.full_name || user.email || '',
-          reparto: user.reparto || '',
-        }))
-      }
-    } catch (error) {
-      console.error('Errore utente salvato:', error)
-    }
-  }, [])
-
-  const lineeAvailable = reparti.find(reparto => reparto.nome === form.reparto)?.linee || []
-  const macchineAvailable = lineeAvailable.find(linea => linea.nome === form.linea)?.macchine || []
-
-  const handleSubmit = async event => {
-    event.preventDefault()
-    if (!file) return alert('Seleziona un file')
-    setUploading(true)
-
-    try {
-      const formData = new FormData()
-      formData.append('file', file)
-      formData.append('compress', compress ? 'true' : 'false')
-      Object.entries(form).forEach(([key, value]) => value && formData.append(key, value))
-
-      const response = await api.post('/documenti/upload', formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-      })
-
-      const compression = response.data.compressione
-      let message = `Documento ${response.data.numero} creato!`
-
-      if (compression?.compressed) {
-        const originalMb = (compression.original_size / 1024 / 1024).toFixed(2)
-        const finalMb = (compression.final_size / 1024 / 1024).toFixed(2)
-        message += `\n\nCompressione: ${originalMb} MB → ${finalMb} MB (-${compression.saved_pct}%)`
-      }
-
-      alert(message)
-      onSaved()
-      onClose()
-    } catch (error) {
-      console.error(error)
-      alert('Errore upload: ' + (error.response?.data?.detail || error.message))
-    } finally {
-      setUploading(false)
-    }
-  }
-
-  return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
-        <div className="bg-primary text-white p-4 rounded-t-xl flex justify-between items-center sticky top-0 z-10">
-          <h2 className="text-lg font-bold">Carica Documento</h2>
-          <button type="button" onClick={onClose}><X size={20} /></button>
-        </div>
-
-        <form onSubmit={handleSubmit} className="p-6 space-y-4">
-          <div>
-            <label className="block text-sm font-medium mb-1">File <span className="text-red-500">*</span></label>
-            <div className="border-2 border-dashed border-gray-300 rounded-lg p-6 text-center cursor-pointer hover:border-primary" onClick={() => fileRef.current?.click()}>
-              <input ref={fileRef} type="file" onChange={event => setFile(event.target.files?.[0] || null)} className="hidden" />
-              {file ? (
-                <div>
-                  <FileText className="mx-auto text-green-600 mb-2" size={32} />
-                  <p className="text-sm font-medium">{file.name}</p>
-                  <p className="text-xs text-gray-500">{(file.size / 1024).toFixed(1)} KB</p>
-                </div>
-              ) : (
-                <div className="text-gray-400">
-                  <Upload className="mx-auto mb-2" size={32} />
-                  <p className="text-sm">Click per selezionare il file</p>
-                  <p className="text-xs">PDF, DOCX, XLSX, PPTX, immagini (max 50MB)</p>
-                </div>
-              )}
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            <div>
-              <label className="block text-sm font-medium mb-1">Titolo <span className="text-red-500">*</span></label>
-              <input required value={form.titolo} onChange={event => setForm({ ...form, titolo: event.target.value })} className="w-full border rounded-lg px-3 py-2" />
-            </div>
-            <div>
-              <label className="block text-sm font-medium mb-1">Tipo <span className="text-red-500">*</span></label>
-              <select value={form.tipo} onChange={event => setForm({ ...form, tipo: event.target.value })} className="w-full border rounded-lg px-3 py-2">
-                <option>OPL</option><option>SOP</option><option>Procedura</option><option>Istruzione</option>
-              </select>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            <div>
-              <label className="block text-sm font-medium mb-1">Categoria</label>
-              <select value={form.categoria} onChange={event => setForm({ ...form, categoria: event.target.value })} className="w-full border rounded-lg px-3 py-2">
-                <option value="">-- Seleziona --</option>
-                {CATEGORIE.map(categoria => <option key={categoria}>{categoria}</option>)}
-              </select>
-            </div>
-            <div>
-              <label className="block text-sm font-medium mb-1">Autore</label>
-              <input value={form.autore} onChange={event => setForm({ ...form, autore: event.target.value })} className="w-full border rounded-lg px-3 py-2 bg-gray-50" />
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-            <div>
-              <label className="block text-sm font-medium mb-1">Reparto</label>
-              <select value={form.reparto} onChange={event => setForm({ ...form, reparto: event.target.value, linea: '', macchina: '' })} className="w-full border rounded-lg px-3 py-2">
-                <option value="">-- Seleziona --</option>
-                {reparti.map(reparto => <option key={reparto._id || reparto.nome} value={reparto.nome}>{reparto.nome}</option>)}
-              </select>
-            </div>
-            <div>
-              <label className="block text-sm font-medium mb-1">Linea</label>
-              <select value={form.linea} onChange={event => setForm({ ...form, linea: event.target.value, macchina: '' })} disabled={!form.reparto} className="w-full border rounded-lg px-3 py-2 disabled:bg-gray-100">
-                <option value="">-- Seleziona --</option>
-                {lineeAvailable.filter(linea => linea.attivo !== false).map(linea => <option key={linea.id || linea.nome} value={linea.nome}>{linea.nome}</option>)}
-              </select>
-            </div>
-            <div>
-              <label className="block text-sm font-medium mb-1">Macchina</label>
-              <select value={form.macchina} onChange={event => setForm({ ...form, macchina: event.target.value })} disabled={!form.linea} className="w-full border rounded-lg px-3 py-2 disabled:bg-gray-100">
-                <option value="">-- Seleziona --</option>
-                {macchineAvailable.filter(macchina => macchina.attivo !== false).map(macchina => <option key={macchina.id || macchina.nome} value={macchina.nome}>{macchina.nome}</option>)}
-              </select>
-            </div>
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium mb-1">Descrizione</label>
-            <textarea value={form.descrizione} onChange={event => setForm({ ...form, descrizione: event.target.value })} rows={2} className="w-full border rounded-lg px-3 py-2" />
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium mb-1">Tag (separati da virgola)</label>
-            <input value={form.tag} onChange={event => setForm({ ...form, tag: event.target.value })} className="w-full border rounded-lg px-3 py-2" />
-          </div>
-
-          <label className="flex items-center gap-2 p-3 bg-blue-50 rounded-lg border border-blue-200 cursor-pointer">
-            <input type="checkbox" checked={compress} onChange={event => setCompress(event.target.checked)} className="w-4 h-4" />
-            <span className="text-sm"><strong>Comprimi automaticamente</strong> — Riduce dimensioni di immagini, PDF e file Office</span>
-          </label>
-
-          <div className="flex justify-end gap-2 pt-4 border-t">
-            <button type="button" onClick={onClose} className="px-4 py-2 border rounded-lg">Annulla</button>
-            <button type="submit" disabled={uploading || !file} className="px-6 py-2 bg-primary text-white rounded-lg hover:bg-primary-light disabled:opacity-50">
-              {uploading ? 'Carico...' : 'Carica'}
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
-  )
-}
-
-// ─────────────────────────────────────────────────────────────
-// EDIT MODAL
-// ─────────────────────────────────────────────────────────────
-
-function EditModal({ doc, onClose, onSaved }) {
-  const [form, setForm] = useState({
-    titolo: doc.titolo || '',
-    categoria: doc.categoria || '',
-    reparto: doc.reparto || '',
-    linea: doc.linea || '',
-    macchina: doc.macchina || '',
-    autore: doc.autore || '',
-    descrizione: doc.descrizione || '',
-    stato: doc.stato || 'Bozza',
-  })
-  const [newFile, setNewFile] = useState(null)
-  const [saving, setSaving] = useState(false)
-  const fileRef = useRef(null)
-
-  const handleSubmit = async (e) => {
-    e.preventDefault()
-    setSaving(true)
-    try {
-      await api.put(`/documenti/${doc._id}`, form)
-      if (newFile) {
-        const formData = new FormData()
-        formData.append('file', newFile)
-        await api.post(`/documenti/${doc._id}/upload-version`, formData, {
-          headers: { 'Content-Type': 'multipart/form-data' },
-        })
-      }
-      alert('Documento aggiornato!')
-      onSaved()
-      onClose()
-    } catch (err) {
-      console.error(err)
-      alert('Errore: ' + (err.response?.data?.detail || err.message))
-    }
-    setSaving(false)
-  }
-
-  return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto">
-        <div className="bg-primary text-white p-4 rounded-t-xl flex justify-between items-center sticky top-0">
-          <h2 className="text-lg font-bold">Modifica {doc.numero} (v{doc.versione})</h2>
-          <button onClick={onClose}><X size={20} /></button>
-        </div>
-        <form onSubmit={handleSubmit} className="p-6 space-y-4">
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            <div>
-              <label className="block text-sm font-medium mb-1">Titolo</label>
-              <input value={form.titolo} onChange={(e) => setForm({...form, titolo: e.target.value})} className="w-full border rounded-lg px-3 py-2" />
-            </div>
-            <div>
-              <label className="block text-sm font-medium mb-1">Stato</label>
-              <select value={form.stato} onChange={(e) => setForm({...form, stato: e.target.value})} className="w-full border rounded-lg px-3 py-2">
-                {STATI.map(s => <option key={s}>{s}</option>)}
-              </select>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-            <div>
-              <label className="block text-sm font-medium mb-1">Categoria</label>
-              <select value={form.categoria} onChange={(e) => setForm({...form, categoria: e.target.value})} className="w-full border rounded-lg px-3 py-2">
-                <option value="">-- Seleziona --</option>
-                {CATEGORIE.map(c => <option key={c}>{c}</option>)}
-              </select>
-            </div>
-            <div>
-              <label className="block text-sm font-medium mb-1">Autore</label>
-              <input value={form.autore} onChange={(e) => setForm({...form, autore: e.target.value})} className="w-full border rounded-lg px-3 py-2" />
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-            <div>
-              <label className="block text-sm font-medium mb-1">Reparto</label>
-              <input value={form.reparto} onChange={(e) => setForm({...form, reparto: e.target.value})} className="w-full border rounded-lg px-3 py-2" />
-            </div>
-            <div>
-              <label className="block text-sm font-medium mb-1">Linea</label>
-              <input value={form.linea} onChange={(e) => setForm({...form, linea: e.target.value})} className="w-full border rounded-lg px-3 py-2" />
-            </div>
-            <div>
-              <label className="block text-sm font-medium mb-1">Macchina</label>
-              <input value={form.macchina} onChange={(e) => setForm({...form, macchina: e.target.value})} className="w-full border rounded-lg px-3 py-2" />
-            </div>
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium mb-1">Descrizione</label>
-            <textarea value={form.descrizione} onChange={(e) => setForm({...form, descrizione: e.target.value})} rows={2} className="w-full border rounded-lg px-3 py-2" />
-          </div>
-
-          <div className="border-2 border-dashed border-gray-300 rounded-lg p-4 text-center cursor-pointer hover:border-primary" onClick={() => fileRef.current?.click()}>
-            <input ref={fileRef} type="file" onChange={(e) => setNewFile(e.target.files[0])} className="hidden" />
-            {newFile ? (
-              <div>
-                <FileText className="mx-auto text-green-600 mb-1" size={20} />
-                <p className="text-sm">Nuova versione: <strong>{newFile.name}</strong></p>
-                <p className="text-xs text-gray-500">Verrà creata v{(doc.versione || 1) + 1}</p>
-              </div>
-            ) : (
-              <div className="text-gray-400 text-sm">
-                <Upload className="mx-auto mb-1" size={20} />
-                Carica nuova versione del file (opzionale)
-              </div>
-            )}
-          </div>
-
-          {doc.versioni_precedenti && doc.versioni_precedenti.length > 0 && (
-            <div>
-              <label className="block text-sm font-medium mb-1">Versioni precedenti</label>
-              <div className="space-y-1">
-                {doc.versioni_precedenti.map(v => {
-                  const vUrl = `${API_BASE}/api/documenti/${doc._id}/version/${v.versione}`
-                  return (
-                    <a key={v.versione} href={vUrl} target="_blank" rel="noopener noreferrer" className="flex items-center gap-2 text-xs text-gray-600 hover:text-primary">
-                      <Download size={12} /> v{v.versione} — {v.file_name}
-                    </a>
-                  )
-                })}
-              </div>
-            </div>
-          )}
-
-          <div className="flex justify-end gap-2 pt-4 border-t">
-            <button type="button" onClick={onClose} className="px-4 py-2 border rounded-lg">Annulla</button>
-            <button type="submit" disabled={saving} className="px-6 py-2 bg-primary text-white rounded-lg hover:bg-primary-light disabled:opacity-50">
-              {saving ? 'Salvo...' : 'Salva'}
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
-  )
-}
-
-// ─────────────────────────────────────────────────────────────
-// BULK UPLOAD MODAL
-// ─────────────────────────────────────────────────────────────
-
-function BulkUploadModal({ onClose, onSaved }) {
-  const [files, setFiles] = useState([])
-  const [autore, setAutore] = useState('')
-  const [compress, setCompress] = useState(true)
-  const [uploading, setUploading] = useState(false)
-  const [progress, setProgress] = useState(0)
-  const [result, setResult] = useState(null)
-  const [dragOver, setDragOver] = useState(false)
-  const fileRef = useRef(null)
-
-  const namePattern = /\b(OPL|SOP|PROC|IST)\b[\s_\-]*(\d{1,5})/i
-
-  function analyzeFile(file) {
-    const filenameNoExt = file.name.replace(/\.[^.]+$/, '')
-    const match = filenameNoExt.match(namePattern)
-
-    if (match) {
-      const tipoRaw = match[1].toUpperCase()
-      const numero = match[2].padStart(3, '0')
-      let titoloRaw = filenameNoExt.replace(namePattern, '').trim()
-      titoloRaw = titoloRaw.replace(/^[\s_\-]+/, '')
-      let titolo = titoloRaw.replace(/_/g, ' ').replace(/\s+/g, ' ').trim()
-
-      if (!titolo) titolo = filenameNoExt.replace(/_/g, ' ').trim()
-
-      return {
-        valid: true,
-        tipo: tipoRaw,
-        numero: `${tipoRaw}-${numero}`,
-        titolo: titolo,
-      }
-    }
     return {
-      valid: false,
-      titolo: filenameNoExt.replace(/_/g, ' ').replace(/-/g, ' ').trim(),
+        "items": items,
+        "count": len(items),
     }
-  }
 
-  function handleFiles(selectedFiles) {
-    const arr = Array.from(selectedFiles)
-    const enriched = arr.map(f => ({
-      file: f,
-      name: f.name,
-      size: f.size,
-      analysis: analyzeFile(f),
-    }))
-    setFiles(prev => [...prev, ...enriched])
-  }
 
-  function removeFile(index) {
-    setFiles(files.filter((_, i) => i !== index))
-  }
+@router.post("/{documento_id}/pubblica")
+async def pubblica_opl(
+    documento_id: str,
+    payload: PubblicaPayload,
+    current_user: dict = Depends(get_current_user),
+):
+    document_object_id = _object_id(documento_id, "ID documento")
+    doc = await db.documenti.find_one({"_id": document_object_id})
 
-  function handleDrop(e) {
-    e.preventDefault()
-    setDragOver(false)
-    handleFiles(e.dataTransfer.files)
-  }
+    if not doc:
+        raise HTTPException(status_code=404, detail="Documento non trovato")
 
-  async function handleUpload() {
-    if (files.length === 0) return alert('Aggiungi almeno un file')
-    setUploading(true)
-    setProgress(0)
+    if doc.get("tipo") != "OPL":
+        raise HTTPException(status_code=400, detail="Il documento selezionato non è una OPL")
 
-    const formData = new FormData()
-    files.forEach(f => formData.append('files', f.file))
-    if (autore) formData.append('autore', autore)
-    formData.append('compress', compress ? 'true' : 'false')
+    if not payload.reparti and not payload.user_ids:
+        raise HTTPException(status_code=400, detail="Seleziona almeno un reparto")
 
-    try {
-      const res = await api.post('/documenti/bulk-upload', formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-        onUploadProgress: (e) => {
-          if (e.total) {
-            setProgress(Math.round((e.loaded * 100) / e.total))
-          }
-        },
-        timeout: 300000,
-      })
-      setResult(res.data)
-    } catch (err) {
-      console.error(err)
-      alert('Errore bulk upload: ' + (err.response?.data?.detail || err.message))
-      setUploading(false)
+    scadenza = _utc_datetime(payload.scadenza)
+    if not scadenza:
+        raise HTTPException(status_code=400, detail="Scadenza non valida")
+
+    now = datetime.now(timezone.utc)
+    if scadenza < now:
+        raise HTTPException(status_code=400, detail="La scadenza non può essere nel passato")
+
+    destinatari = await _risolvi_destinatari(payload)
+    if not destinatari:
+        raise HTTPException(status_code=400, detail="Nessun destinatario trovato per i criteri scelti")
+
+    versione = doc.get("versione", 1)
+    document_hash = _hash_versione(doc)
+    publisher_id = _current_user_id(current_user)
+
+    letture = []
+    notifiche = []
+
+    for user in destinatari:
+        user_id = str(user["_id"])
+        existing = await db.opl_letture.find_one({
+            "document_id": documento_id,
+            "version": versione,
+            "user_id": user_id,
+        })
+
+        if existing:
+            if existing.get("status") != "confermata":
+                await db.opl_letture.update_one(
+                    {"_id": existing["_id"]},
+                    {"$set": {
+                        "document_number": doc.get("numero"),
+                        "document_title": doc.get("titolo"),
+                        "document_hash": document_hash,
+                        "scadenza": scadenza,
+                        "updated_at": now,
+                    }},
+                )
+            continue
+
+        user_name = user.get("full_name") or user.get("name") or user.get("username") or user.get("email")
+
+        letture.append({
+            "document_id": documento_id,
+            "document_number": doc.get("numero"),
+            "document_title": doc.get("titolo"),
+            "version": versione,
+            "document_hash": document_hash,
+            "user_id": user_id,
+            "user_name": user_name,
+            "user_email": user.get("email"),
+            "reparto": user.get("reparto"),
+            "linee": user.get("linee", []),
+            "role": user.get("role"),
+            "status": "da_leggere",
+            "assigned_at": now,
+            "confirmed_at": None,
+            "scadenza": scadenza,
+            "assigned_by": publisher_id,
+            "created_at": now,
+            "updated_at": now,
+        })
+
+        notifiche.append({
+            "user_id": user_id,
+            "type": "opl_da_leggere",
+            "title": "Nuova OPL da leggere",
+            "message": f"{doc.get('numero')} - {doc.get('titolo')}",
+            "entity_type": "opl",
+            "entity_id": documento_id,
+            "entity_label": doc.get("numero"),
+            "entity_title": doc.get("titolo"),
+            "action_url": f"/da-leggere?opl={documento_id}",
+            "is_read": False,
+            "read_at": None,
+            "created_at": now,
+        })
+
+    if letture:
+        await db.opl_letture.insert_many(letture)
+
+    if notifiche:
+        await db.notifications.insert_many(notifiche)
+
+    await db.documenti.update_one(
+        {"_id": document_object_id},
+        {"$set": {
+            "pubblicata": True,
+            "versione_pubblicata": versione,
+            "hash_pubblicato": document_hash,
+            "data_pubblicazione": now,
+            "stato": "Approvato",
+            "scadenza_lettura": scadenza,
+            "reparti_assegnati": payload.reparti,
+            "linee_assegnate": payload.linee,
+            "updated_at": now,
+        }},
+    )
+
+    return {
+        "message": "OPL pubblicata e assegnata",
+        "destinatari": len(destinatari),
+        "assegnazioni_create": len(letture),
+        "assegnazioni_esistenti": len(destinatari) - len(letture),
     }
-  }
 
-  function handleClose() {
-    if (result) onSaved()
-    onClose()
-  }
 
-  const totalSize = files.reduce((sum, f) => sum + f.size, 0)
-  const validCount = files.filter(f => f.analysis.valid).length
-  const invalidCount = files.length - validCount
+@router.post("/{documento_id}/conferma")
+async def conferma_lettura(
+    documento_id: str,
+    payload: ConfermaPayload,
+    current_user: dict = Depends(get_current_user),
+):
+    document_object_id = _object_id(documento_id, "ID documento")
+    doc = await db.documenti.find_one({"_id": document_object_id})
 
-  return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-xl w-full max-w-4xl max-h-[92vh] overflow-y-auto shadow-2xl">
-        <div className="bg-green-600 text-white p-4 rounded-t-xl flex justify-between items-center sticky top-0 z-10">
-          <h2 className="text-lg font-bold">Bulk Upload — Carica multipli</h2>
-          <button onClick={handleClose}><X size={20} /></button>
-        </div>
+    if not doc:
+        raise HTTPException(status_code=404, detail="Documento non trovato")
 
-        <div className="p-6 space-y-4">
-          {!result && (
-            <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 text-sm">
-              <div className="font-semibold text-blue-900 mb-1">Naming intelligente</div>
-              <div className="text-blue-700 text-xs space-y-0.5">
-                <div>I file con nome <code className="bg-blue-100 px-1 rounded">TIPO-ANNO-NUM_Titolo.ext</code> vengono parsati automaticamente.</div>
-                <div>Esempi: <code className="bg-blue-100 px-1 rounded">OPL-2026-001_Pulizia.pdf</code> · <code className="bg-blue-100 px-1 rounded">SOP-2026-014_Avviamento.docx</code></div>
-                <div>Altri nomi → numero progressivo automatico.</div>
-              </div>
-            </div>
-          )}
+    versione = doc.get("versione_pubblicata") or doc.get("versione", 1)
+    user_id = _current_user_id(current_user)
 
-          {!result && !uploading && (
-            <div
-              onDragOver={(e) => { e.preventDefault(); setDragOver(true) }}
-              onDragLeave={() => setDragOver(false)}
-              onDrop={handleDrop}
-              onClick={() => fileRef.current?.click()}
-              className={`border-2 border-dashed rounded-lg p-8 text-center cursor-pointer transition-all ${
-                dragOver ? 'border-green-500 bg-green-50' : 'border-gray-300 hover:border-green-400'
-              }`}
-            >
-              <input
-                ref={fileRef}
-                type="file"
-                multiple
-                onChange={(e) => handleFiles(e.target.files)}
-                className="hidden"
-                accept=".pdf,.docx,.xlsx,.pptx,.doc,.xls,.ppt,.png,.jpg,.jpeg"
-              />
-              <Upload className="mx-auto mb-2 text-gray-400" size={48} />
-              <p className="text-lg font-medium">Trascina qui i tuoi file</p>
-              <p className="text-sm text-gray-500">oppure click per selezionarli</p>
-              <p className="text-xs text-gray-400 mt-2">PDF, DOCX, XLSX, PPTX, immagini (max 50MB)</p>
-            </div>
-          )}
+    lettura = await db.opl_letture.find_one({
+        "document_id": documento_id,
+        "version": versione,
+        "user_id": user_id,
+    })
 
-          {!result && files.length > 0 && !uploading && (
-            <div className="border rounded-lg overflow-hidden">
-              <div className="bg-gray-50 px-3 py-2 text-xs font-medium flex justify-between items-center">
-                <span>{files.length} file pronti · {(totalSize / 1024 / 1024).toFixed(2)} MB totali</span>
-                <span className="flex gap-3">
-                  <span className="text-green-600">{validCount} parsati</span>
-                  {invalidCount > 0 && <span className="text-orange-600">{invalidCount} manuali</span>}
-                  <button onClick={() => setFiles([])} className="text-red-600 hover:underline">Svuota</button>
-                </span>
-              </div>
-              <div className="max-h-64 overflow-y-auto">
-                {files.map((f, i) => (
-                  <div key={i} className="px-3 py-2 border-t flex items-center gap-3 text-sm hover:bg-gray-50">
-                    <FileText size={16} className={f.analysis.valid ? 'text-green-600' : 'text-orange-500'} />
-                    <div className="flex-1 min-w-0">
-                      <div className="font-medium truncate">{f.name}</div>
-                      <div className="text-xs text-gray-500 flex gap-2">
-                        <span>{(f.size / 1024).toFixed(1)} KB</span>
-                        {f.analysis.valid ? (
-                          <span className="text-green-600">→ {f.analysis.numero} · {f.analysis.titolo}</span>
-                        ) : (
-                          <span className="text-orange-600">→ Titolo: "{f.analysis.titolo}" · numero auto</span>
-                        )}
-                      </div>
-                    </div>
-                    <button onClick={() => removeFile(i)} className="text-red-500 hover:bg-red-50 p-1 rounded">
-                      <Trash2 size={14} />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
+    if not lettura:
+        raise HTTPException(status_code=404, detail="Nessuna assegnazione di lettura per questa versione")
 
-          {!result && !uploading && files.length > 0 && (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-2">
-              <div>
-                <label className="block text-sm font-medium mb-1">Autore (opzionale)</label>
-                <input
-                  value={autore}
-                  onChange={(e) => setAutore(e.target.value)}
-                  className="w-full border rounded-lg px-3 py-2 text-sm"
-                />
-              </div>
-              <div className="flex items-end">
-                <label className="flex items-center gap-2 p-2 bg-blue-50 rounded-lg border border-blue-200 cursor-pointer flex-1">
-                  <input
-                    type="checkbox"
-                    checked={compress}
-                    onChange={(e) => setCompress(e.target.checked)}
-                    className="w-4 h-4"
-                  />
-                  <span className="text-sm">Comprimi automaticamente</span>
-                </label>
-              </div>
-            </div>
-          )}
-
-          {uploading && !result && (
-            <div className="text-center py-8">
-              <div className="text-lg font-medium mb-2">Caricamento in corso...</div>
-              <div className="text-sm text-gray-500 mb-4">
-                Sto caricando {files.length} file · {(totalSize / 1024 / 1024).toFixed(2)} MB
-                {compress && ' · con compressione attiva'}
-              </div>
-              <div className="w-full bg-gray-200 rounded-full h-4 overflow-hidden">
-                <div
-                  className="bg-green-500 h-4 transition-all duration-300 flex items-center justify-center text-xs text-white font-bold"
-                  style={{ width: `${progress}%` }}
-                >
-                  {progress > 10 && `${progress}%`}
-                </div>
-              </div>
-              <div className="text-xs text-gray-400 mt-2">
-                {progress < 100 ? 'Upload + compressione + salvataggio in corso...' : 'Elaborazione finale...'}
-              </div>
-            </div>
-          )}
-
-          {result && (
-            <div className="space-y-3">
-              <div className="bg-green-50 border border-green-200 rounded-lg p-4 text-center">
-                <div className="text-3xl mb-2">🎉</div>
-                <div className="text-lg font-bold text-green-900">Bulk Upload completato!</div>
-                <div className="text-sm text-gray-700 mt-2 flex justify-center gap-4">
-                  <span>Totale: <strong>{result.totale}</strong></span>
-                  <span className="text-green-700">Successo: <strong>{result.successo}</strong></span>
-                  {result.fallimenti > 0 && (
-                    <span className="text-red-600">Errori: <strong>{result.fallimenti}</strong></span>
-                  )}
-                </div>
-                {result.risparmio_totale_mb > 0 && (
-                  <div className="mt-2 text-sm text-blue-700">
-                    Risparmio compressione: <strong>{result.risparmio_totale_mb} MB</strong>
-                  </div>
-                )}
-              </div>
-
-              {result.creati && result.creati.length > 0 && (
-                <details className="border rounded-lg" open>
-                  <summary className="px-3 py-2 bg-green-50 cursor-pointer font-medium text-sm">
-                    Nuovi documenti ({result.creati.length})
-                  </summary>
-                  <div className="max-h-48 overflow-y-auto text-xs">
-                    {result.creati.map((d, i) => (
-                      <div key={i} className="px-3 py-1.5 border-t flex justify-between">
-                        <span>
-                          <strong className="text-primary">{d.numero}</strong> — {d.titolo}
-                          {!d.auto_parsed && <span className="text-orange-500 ml-1">(titolo manuale)</span>}
-                        </span>
-                        {d.compressione?.compressed && (
-                          <span className="text-green-600">-{d.compressione.saved_pct}%</span>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                </details>
-              )}
-
-              {result.aggiornati && result.aggiornati.length > 0 && (
-                <details className="border rounded-lg">
-                  <summary className="px-3 py-2 bg-blue-50 cursor-pointer font-medium text-sm">
-                    Nuove versioni ({result.aggiornati.length})
-                  </summary>
-                  <div className="max-h-48 overflow-y-auto text-xs">
-                    {result.aggiornati.map((d, i) => (
-                      <div key={i} className="px-3 py-1.5 border-t">
-                        <strong className="text-primary">{d.numero}</strong> — {d.titolo} → v{d.versione}
-                      </div>
-                    ))}
-                  </div>
-                </details>
-              )}
-
-              {result.errori && result.errori.length > 0 && (
-                <details className="border rounded-lg" open>
-                  <summary className="px-3 py-2 bg-red-50 cursor-pointer font-medium text-sm text-red-700">
-                    Errori ({result.errori.length})
-                  </summary>
-                  <div className="max-h-48 overflow-y-auto text-xs">
-                    {result.errori.map((e, i) => (
-                      <div key={i} className="px-3 py-1.5 border-t">
-                        <strong>{e.filename}</strong>: <span className="text-red-600">{e.errore}</span>
-                      </div>
-                    ))}
-                  </div>
-                </details>
-              )}
-            </div>
-          )}
-
-          <div className="flex justify-end gap-2 pt-4 border-t">
-            <button type="button" onClick={handleClose} className="px-4 py-2 border rounded-lg">
-              {result ? 'Chiudi' : 'Annulla'}
-            </button>
-            {!result && (
-              <button
-                onClick={handleUpload}
-                disabled={uploading || files.length === 0}
-                className="px-6 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 flex items-center gap-2"
-              >
-                {uploading ? `Carico ${files.length}...` : `Carica ${files.length} file`}
-              </button>
-            )}
-          </div>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-// ─────────────────────────────────────────────────────────────
-// OPL NATIVA MODAL — form completo per creare OPL strutturate
-// ─────────────────────────────────────────────────────────────
-
-function OplNativaModal({ onClose, onSaved }) {
-  const [saving, setSaving] = useState(false)
-  const [step, setStep] = useState(1) // 1=anagrafica, 2=contenuto, 3=verifica
-
-  // Dati caricati dal backend
-  const [areaOptions, setAreaOptions] = useState([])
-  const [tipoOptions, setTipoOptions] = useState([])
-  const [reparti, setReparti] = useState([])
-
-  // Form state
-  const [form, setForm] = useState({
-    titolo: '',
-    area_opl_id: '',
-    area_opl_label: '',
-    tipo_opl_id: '',
-    tipo_opl_label: '',
-    reparto: '',
-    linea: '',
-    macchina: '',
-    autore: '',
-    problema: '',
-    causa: '',
-    miglioramento: '',
-    verifica_1: '',
-    verifica_2: '',
-    verifica_3: '',
-    immagine_base64: '',
-    immagine_preview: '',
-  })
-
-  // Carica dati iniziali
-  useEffect(() => {
-    api.get('/configurazioni/?tipo=area_opl&attivo=true')
-      .then(res => setAreaOptions(res.data || []))
-      .catch(err => console.error('Errore area OPL:', err))
-    api.get('/configurazioni/?tipo=tipo_opl&attivo=true')
-      .then(res => setTipoOptions(res.data || []))
-      .catch(err => console.error('Errore tipo OPL:', err))
-    api.get('/reparti/')
-      .then(res => setReparti(res.data || []))
-      .catch(err => console.error('Errore reparti:', err))
-
-    // Autore da utente loggato (localStorage)
-    try {
-      const userStr = localStorage.getItem('user')
-      if (userStr) {
-        const user = JSON.parse(userStr)
-        setForm(f => ({ ...f, autore: user.name || user.email || '' }))
-      }
-    } catch (e) { /* ignore */ }
-  }, [])
-
-  // Linee filtrate dal reparto scelto
-  const lineeAvailable = (reparti.find(r => r.nome === form.reparto)?.linee || [])
-  const macchineAvailable = (lineeAvailable.find(l => l.nome === form.linea)?.macchine || [])
-
-  // Handler cambio area (aggiorna sia id che label)
-  function handleAreaChange(id) {
-    const a = areaOptions.find(x => x._id === id)
-    setForm({ ...form, area_opl_id: id, area_opl_label: a?.label || '' })
-  }
-  function handleTipoChange(id) {
-    const t = tipoOptions.find(x => x._id === id)
-    setForm({ ...form, tipo_opl_id: id, tipo_opl_label: t?.label || '' })
-  }
-  function handleRepartoChange(nome) {
-    setForm({ ...form, reparto: nome, linea: '', macchina: '' })
-  }
-  function handleLineaChange(nome) {
-    setForm({ ...form, linea: nome, macchina: '' })
-  }
-
-  // Upload immagine con compressione
-  async function handleImageUpload(e) {
-    const file = e.target.files?.[0]
-    if (!file) return
-    if (!file.type.startsWith('image/')) {
-      alert('Seleziona un file immagine valido')
-      return
-    }
-    if (file.size > 5 * 1024 * 1024) {
-      alert('Immagine troppo grande (max 5 MB)')
-      return
-    }
-    // Compressione client-side a max 1280px
-    const compressed = await compressImage(file, 1280, 0.8)
-    setForm(f => ({
-      ...f,
-      immagine_base64: compressed,
-      immagine_preview: compressed,
-    }))
-  }
-
-  function removeImage() {
-    setForm(f => ({ ...f, immagine_base64: '', immagine_preview: '' }))
-  }
-
-  // Submit
-  async function handleSubmit() {
-    if (!form.titolo.trim()) {
-      alert('Titolo obbligatorio')
-      setStep(1)
-      return
-    }
-    setSaving(true)
-    try {
-      const payload = {
-        titolo: form.titolo,
-        area_opl_id: form.area_opl_id || null,
-        area_opl_label: form.area_opl_label || null,
-        tipo_opl_id: form.tipo_opl_id || null,
-        tipo_opl_label: form.tipo_opl_label || null,
-        reparto: form.reparto || null,
-        linea: form.linea || null,
-        macchina: form.macchina || null,
-        autore: form.autore || null,
-        problema: form.problema,
-        causa: form.causa,
-        miglioramento: form.miglioramento,
-        verifica_1: form.verifica_1,
-        verifica_2: form.verifica_2,
-        verifica_3: form.verifica_3,
-        immagine_base64: form.immagine_base64 || null,
-      }
-      const res = await api.post('/documenti/opl-nativa', payload)
-      alert(`OPL Nativa ${res.data.numero} creata con successo`)
-      onSaved()
-      onClose()
-    } catch (err) {
-      console.error(err)
-      alert('Errore creazione OPL: ' + (err.response?.data?.detail || err.message))
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  const canGoNext = form.titolo.trim().length > 0
-
-  return (
-    <div className="fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-xl w-full max-w-3xl max-h-[95vh] overflow-y-auto shadow-2xl">
-        {/* Header */}
-        <div className="bg-yellow-500 text-white p-4 rounded-t-xl flex justify-between items-center sticky top-0 z-10">
-          <div>
-            <h2 className="text-lg font-bold">Nuova OPL Nativa</h2>
-            <div className="text-xs opacity-90">Step {step} di 3</div>
-          </div>
-          <button onClick={onClose}><X size={20} /></button>
-        </div>
-
-        {/* Stepper */}
-        <div className="flex border-b bg-gray-50">
-          {[
-            { n: 1, label: 'Anagrafica' },
-            { n: 2, label: 'Contenuto' },
-            { n: 3, label: 'Verifica apprendimento' },
-          ].map(s => (
-            <button
-              key={s.n}
-              onClick={() => setStep(s.n)}
-              className={`flex-1 px-4 py-3 text-sm font-medium border-b-2 transition-colors ${
-                step === s.n
-                  ? 'border-yellow-500 text-yellow-700 bg-white'
-                  : 'border-transparent text-gray-500 hover:bg-gray-100'
-              }`}
-            >
-              <span className="font-mono mr-1">{s.n}.</span> {s.label}
-            </button>
-          ))}
-        </div>
-
-        {/* STEP 1 — ANAGRAFICA */}
-        {step === 1 && (
-          <div className="p-6 space-y-4">
-            <div>
-              <label className="block text-sm font-medium mb-1">
-                Titolo <span className="text-red-500">*</span>
-              </label>
-              <input
-                autoFocus
-                value={form.titolo}
-                onChange={(e) => setForm({ ...form, titolo: e.target.value })}
-                className="w-full border rounded-lg px-3 py-2"
-                placeholder="Es: Pulizia filtro Bindler 11"
-              />
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              <div>
-                <label className="block text-sm font-medium mb-1">Area OPL</label>
-                <select
-                  value={form.area_opl_id}
-                  onChange={(e) => handleAreaChange(e.target.value)}
-                  className="w-full border rounded-lg px-3 py-2"
-                >
-                  <option value="">— Seleziona —</option>
-                  {areaOptions.map(a => (
-                    <option key={a._id} value={a._id}>
-                      {a.icon ? `${a.icon} ` : ''}{a.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="block text-sm font-medium mb-1">Tipo OPL</label>
-                <select
-                  value={form.tipo_opl_id}
-                  onChange={(e) => handleTipoChange(e.target.value)}
-                  className="w-full border rounded-lg px-3 py-2"
-                >
-                  <option value="">— Seleziona —</option>
-                  {tipoOptions.map(t => (
-                    <option key={t._id} value={t._id}>
-                      {t.icon ? `${t.icon} ` : ''}{t.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-              <div>
-                <label className="block text-sm font-medium mb-1">Reparto</label>
-                <select
-                  value={form.reparto}
-                  onChange={(e) => handleRepartoChange(e.target.value)}
-                  className="w-full border rounded-lg px-3 py-2"
-                >
-                  <option value="">— Seleziona —</option>
-                  {reparti.map(r => (
-                    <option key={r._id} value={r.nome}>{r.nome}</option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="block text-sm font-medium mb-1">Linea</label>
-                <select
-                  value={form.linea}
-                  onChange={(e) => handleLineaChange(e.target.value)}
-                  disabled={!form.reparto}
-                  className="w-full border rounded-lg px-3 py-2 disabled:bg-gray-100"
-                >
-                  <option value="">— Seleziona —</option>
-                  {lineeAvailable.map(l => (
-                    <option key={l.id} value={l.nome}>{l.nome}</option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="block text-sm font-medium mb-1">Macchina</label>
-                <select
-                  value={form.macchina}
-                  onChange={(e) => setForm({ ...form, macchina: e.target.value })}
-                  disabled={!form.linea}
-                  className="w-full border rounded-lg px-3 py-2 disabled:bg-gray-100"
-                >
-                  <option value="">— Seleziona —</option>
-                  {macchineAvailable.map(m => (
-                    <option key={m.id} value={m.nome}>{m.nome}</option>
-                  ))}
-                </select>
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium mb-1">Autore</label>
-              <input
-                value={form.autore}
-                onChange={(e) => setForm({ ...form, autore: e.target.value })}
-                className="w-full border rounded-lg px-3 py-2"
-              />
-            </div>
-          </div>
-        )}
-
-        {/* STEP 2 — CONTENUTO */}
-        {step === 2 && (
-          <div className="p-6 space-y-4">
-            {/* Immagine */}
-            <div>
-              <label className="block text-sm font-medium mb-1">Immagine centrale (opzionale)</label>
-              {form.immagine_preview ? (
-                <div className="relative">
-                  {React.createElement('img', {
-                    src: form.immagine_preview,
-                    alt: 'Preview',
-                    className: 'w-full max-h-64 object-contain border rounded-lg bg-gray-50',
-                  })}
-                  <button
-                    onClick={removeImage}
-                    className="absolute top-2 right-2 bg-red-500 text-white p-1 rounded-full"
-                  >
-                    <X size={16} />
-                  </button>
-                </div>
-              ) : (
-                <label className="block border-2 border-dashed border-gray-300 rounded-lg p-8 text-center cursor-pointer hover:border-yellow-400 hover:bg-yellow-50">
-                  <input type="file" accept="image/*" onChange={handleImageUpload} className="hidden" />
-                  <Upload className="mx-auto mb-2 text-gray-400" size={32} />
-                  <p className="text-sm text-gray-500">Click per caricare immagine (max 5 MB)</p>
-                  <p className="text-xs text-gray-400 mt-1">Verrà compressa automaticamente</p>
-                </label>
-              )}
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium mb-1">Problema (situazione riscontrata)</label>
-              <textarea
-                value={form.problema}
-                onChange={(e) => setForm({ ...form, problema: e.target.value })}
-                rows={3}
-                className="w-full border rounded-lg px-3 py-2 text-sm"
-                placeholder="Descrivi il problema o la situazione da cui nasce l'OPL"
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium mb-1">Causa</label>
-              <textarea
-                value={form.causa}
-                onChange={(e) => setForm({ ...form, causa: e.target.value })}
-                rows={3}
-                className="w-full border rounded-lg px-3 py-2 text-sm"
-                placeholder="Causa radice del problema"
-              />
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium mb-1">
-                Miglioramento / Contenuto <span className="text-gray-400">(cosa fare)</span>
-              </label>
-              <textarea
-                value={form.miglioramento}
-                onChange={(e) => setForm({ ...form, miglioramento: e.target.value })}
-                rows={4}
-                className="w-full border rounded-lg px-3 py-2 text-sm"
-                placeholder="Descrivi la procedura, il miglioramento adottato o l'istruzione operativa"
-              />
-            </div>
-          </div>
-        )}
-
-        {/* STEP 3 — VERIFICA APPRENDIMENTO */}
-        {step === 3 && (
-          <div className="p-6 space-y-4">
-            <div className="bg-blue-50 border-l-4 border-blue-400 rounded-r-lg p-3 text-sm text-blue-800">
-              Inserisci fino a 3 domande di verifica per validare l'apprendimento dell'operatore. Sono opzionali.
-            </div>
-            <div>
-              <label className="block text-sm font-medium mb-1">Domanda 1</label>
-              <input
-                value={form.verifica_1}
-                onChange={(e) => setForm({ ...form, verifica_1: e.target.value })}
-                className="w-full border rounded-lg px-3 py-2 text-sm"
-                placeholder="Es: Ogni quanto va effettuato il controllo?"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium mb-1">Domanda 2</label>
-              <input
-                value={form.verifica_2}
-                onChange={(e) => setForm({ ...form, verifica_2: e.target.value })}
-                className="w-full border rounded-lg px-3 py-2 text-sm"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium mb-1">Domanda 3</label>
-              <input
-                value={form.verifica_3}
-                onChange={(e) => setForm({ ...form, verifica_3: e.target.value })}
-                className="w-full border rounded-lg px-3 py-2 text-sm"
-              />
-            </div>
-          </div>
-        )}
-
-        {/* Footer bottoni */}
-        <div className="border-t bg-gray-50 px-6 py-3 flex justify-between items-center sticky bottom-0">
-          <button
-            onClick={onClose}
-            className="px-4 py-2 border rounded-lg text-sm"
-          >
-            Annulla
-          </button>
-          <div className="flex gap-2">
-            {step > 1 && (
-              <button
-                onClick={() => setStep(step - 1)}
-                className="px-4 py-2 border rounded-lg text-sm"
-              >
-                ← Indietro
-              </button>
-            )}
-            {step < 3 ? (
-              <button
-                onClick={() => setStep(step + 1)}
-                disabled={!canGoNext}
-                className="px-4 py-2 bg-yellow-500 text-white rounded-lg text-sm hover:bg-yellow-600 disabled:opacity-50"
-              >
-                Avanti →
-              </button>
-            ) : (
-              <button
-                onClick={handleSubmit}
-                disabled={saving || !canGoNext}
-                className="px-6 py-2 bg-yellow-500 text-white rounded-lg text-sm hover:bg-yellow-600 disabled:opacity-50 font-medium"
-              >
-                {saving ? 'Creazione...' : 'Crea OPL'}
-              </button>
-            )}
-          </div>
-        </div>
-      </div>
-    </div>
-  )
-}
-
-// Utility: compressione immagine client-side
-async function compressImage(file, maxSize = 1280, quality = 0.8) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader()
-    reader.onload = (e) => {
-      const img = new Image()
-      img.onload = () => {
-        let w = img.width
-        let h = img.height
-        if (w > h && w > maxSize) {
-          h = h * (maxSize / w)
-          w = maxSize
-        } else if (h > maxSize) {
-          w = w * (maxSize / h)
-          h = maxSize
+    if lettura.get("status") == "confermata":
+        return {
+            "message": "Lettura già confermata",
+            "confirmed_at": _iso_datetime(lettura.get("confirmed_at")),
         }
-        const canvas = document.createElement('canvas')
-        canvas.width = w
-        canvas.height = h
-        const ctx = canvas.getContext('2d')
-        ctx.drawImage(img, 0, 0, w, h)
-        const dataUrl = canvas.toDataURL('image/jpeg', quality)
-        resolve(dataUrl)
-      }
-      img.onerror = reject
-      img.src = e.target.result
+
+    confirmation_text = payload.confirmation_text.strip()
+    if confirmation_text != "Confermo di aver letto e compreso":
+        raise HTTPException(status_code=400, detail="Testo di conferma non valido")
+
+    current_hash = doc.get("hash_pubblicato") or _hash_versione(doc)
+    if lettura.get("document_hash") and lettura.get("document_hash") != current_hash:
+        raise HTTPException(status_code=409, detail="La versione pubblicata è cambiata. Riapri la OPL")
+
+    now = datetime.now(timezone.utc)
+
+    await db.opl_letture.update_one(
+        {"_id": lettura["_id"]},
+        {"$set": {
+            "status": "confermata",
+            "confirmed_at": now,
+            "confirmation_text": confirmation_text,
+            "authentication_method": "local_test",
+            "confirmed_hash": current_hash,
+            "updated_at": now,
+        }},
+    )
+
+    await db.notifications.update_many(
+        {
+            "user_id": user_id,
+            "type": "opl_da_leggere",
+            "entity_id": documento_id,
+            "is_read": False,
+        },
+        {"$set": {
+            "is_read": True,
+            "read_at": now,
+        }},
+    )
+
+    return {
+        "message": "Lettura confermata",
+        "confirmed_at": now.isoformat(),
+        "version": versione,
     }
-    reader.onerror = reject
-    reader.readAsDataURL(file)
-  })
-}
 
-// ─────────────────────────────────────────────────────────────
-// OPL NATIVA PREVIEW — layout stile Lindt
-// ─────────────────────────────────────────────────────────────
 
-function OplNativaPreview({ doc, imageBlobUrl }) {
-  const [editorOpen, setEditorOpen] = useState(false)
-  const [refreshKey, setRefreshKey] = useState(0)
-  const [currentDoc, setCurrentDoc] = useState(doc)
+@router.get("/{documento_id}/report")
+async def report_opl(
+    documento_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    document_object_id = _object_id(documento_id, "ID documento")
+    doc = await db.documenti.find_one({"_id": document_object_id})
 
-  useEffect(() => { setCurrentDoc(doc) }, [doc])
+    if not doc:
+        raise HTTPException(status_code=404, detail="Documento non trovato")
 
-  const data = currentDoc.opl_data || {}
-  const areaLabel = data.area_opl_label || '—'
-  const tipoLabel = data.tipo_opl_label || '—'
-  const annotations = data.annotations || []
+    versione = doc.get("versione_pubblicata") or doc.get("versione", 1)
+    now = datetime.now(timezone.utc)
+    righe = []
+    confermati = 0
+    da_leggere = 0
+    in_ritardo = 0
 
-  async function handleAnnotationsSaved() {
-    try {
-      const res = await api.get(`/documenti/${currentDoc._id}`)
-      setCurrentDoc(res.data)
-      setRefreshKey(k => k + 1)
-    } catch (err) {
-      console.error('Errore ricarica documento:', err)
+    cursor = db.opl_letture.find({
+        "document_id": documento_id,
+        "version": versione,
+    }).sort("user_name", 1)
+
+    async for lettura in cursor:
+        stato = lettura.get("status", "da_leggere")
+        scadenza = _utc_datetime(lettura.get("scadenza"))
+        ritardo = stato != "confermata" and scadenza is not None and scadenza < now
+
+        if stato == "confermata":
+            confermati += 1
+            stato_report = "Confermata"
+        else:
+            da_leggere += 1
+            if ritardo:
+                in_ritardo += 1
+                stato_report = "In ritardo"
+            else:
+                stato_report = "Da leggere"
+
+        righe.append({
+            "user_id": lettura.get("user_id"),
+            "user_name": lettura.get("user_name"),
+            "user_email": lettura.get("user_email"),
+            "reparto": lettura.get("reparto"),
+            "linee": lettura.get("linee", []),
+            "role": lettura.get("role"),
+            "status": stato_report,
+            "assigned_at": _iso_datetime(lettura.get("assigned_at")),
+            "confirmed_at": _iso_datetime(lettura.get("confirmed_at")),
+            "scadenza": _iso_datetime(lettura.get("scadenza")),
+            "document_hash": lettura.get("document_hash"),
+            "confirmed_hash": lettura.get("confirmed_hash"),
+        })
+
+    totale = len(righe)
+    completamento = round((confermati / totale) * 100, 1) if totale else 0.0
+
+    return {
+        "documento": {
+            "id": documento_id,
+            "numero": doc.get("numero"),
+            "titolo": doc.get("titolo"),
+            "versione": versione,
+            "data_pubblicazione": _iso_datetime(doc.get("data_pubblicazione")),
+            "scadenza_lettura": _iso_datetime(doc.get("scadenza_lettura")),
+            "hash_pubblicato": doc.get("hash_pubblicato"),
+            "reparti_assegnati": doc.get("reparti_assegnati", []),
+            "linee_assegnate": doc.get("linee_assegnate", []),
+        },
+        "riepilogo": {
+            "destinatari": totale,
+            "confermati": confermati,
+            "da_leggere": da_leggere,
+            "in_ritardo": in_ritardo,
+            "completamento": completamento,
+        },
+        "righe": righe,
     }
-  }
-
-  const hasVerifica = data.verifica_1 || data.verifica_2 || data.verifica_3
-
-  return (
-    <div className="w-full h-full overflow-auto bg-gray-100 p-6">
-      <div className="max-w-4xl mx-auto bg-white shadow-lg rounded-lg overflow-hidden border-4 border-yellow-400">
-
-        {/* Header giallo stile Lindt */}
-        <div className="bg-yellow-400 px-6 py-4 border-b-4 border-yellow-500">
-          <div className="flex justify-between items-start gap-4">
-            <div className="flex-1">
-              <div className="text-xs font-bold uppercase tracking-wider text-yellow-900 mb-1">
-                One Point Lesson
-              </div>
-              <h1 className="text-2xl font-bold text-gray-900 leading-tight">
-                {doc.titolo}
-              </h1>
-            </div>
-            <div className="text-right flex-shrink-0">
-              <div className="bg-white rounded px-3 py-1 shadow-sm">
-                <div className="text-[10px] uppercase text-gray-500 font-semibold">Numero</div>
-                <div className="font-mono font-bold text-lg text-gray-900">{doc.numero}</div>
-              </div>
-            </div>
-          </div>
-
-          {/* Riga metadati */}
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mt-3 text-xs">
-            <MetaBadge label="Area" value={areaLabel} />
-            <MetaBadge label="Tipo" value={tipoLabel} />
-            <MetaBadge label="Reparto" value={doc.reparto || '—'} />
-            <MetaBadge label="Linea" value={doc.linea || '—'} />
-          </div>
-        </div>
-
-        {/* Corpo */}
-        <div className="p-6 space-y-5">
-
-          {/* Immagine centrale */}
-          {imageBlobUrl && (
-            <div className="relative bg-gray-50 border-2 border-gray-200 rounded-lg p-4">
-              <button
-                onClick={() => setEditorOpen(true)}
-                className="absolute top-2 right-2 z-10 bg-yellow-500 text-white px-3 py-1.5 rounded-lg text-xs font-medium hover:bg-yellow-600 shadow flex items-center gap-1"
-                title="Modifica annotazioni sull'immagine"
-              >
-                <Pencil size={12} /> Modifica annotazioni
-              </button>
-              <AnnotatedImage
-                key={refreshKey}
-                imageUrl={imageBlobUrl}
-                annotations={annotations}
-              />
-            </div>
-          )}
-
-          {/* Grid Problema / Causa / Miglioramento */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-            <OplBox
-              title="Problema"
-              content={data.problema}
-              bgColor="bg-red-50"
-              borderColor="border-red-300"
-              textColor="text-red-800"
-              icon="⚠️"
-            />
-            <OplBox
-              title="Causa"
-              content={data.causa}
-              bgColor="bg-orange-50"
-              borderColor="border-orange-300"
-              textColor="text-orange-800"
-              icon="🔍"
-            />
-            <OplBox
-              title="Miglioramento"
-              content={data.miglioramento}
-              bgColor="bg-green-50"
-              borderColor="border-green-300"
-              textColor="text-green-800"
-              icon="✅"
-            />
-          </div>
-
-          {/* Verifica apprendimento */}
-          {hasVerifica && (
-            <div className="bg-blue-50 border-2 border-blue-300 rounded-lg p-4">
-              <h3 className="font-bold text-blue-900 mb-3 flex items-center gap-2">
-                <span>📝</span> Verifica apprendimento
-              </h3>
-              <ol className="space-y-2 list-decimal list-inside text-sm text-blue-900">
-                {data.verifica_1 && <li>{data.verifica_1}</li>}
-                {data.verifica_2 && <li>{data.verifica_2}</li>}
-                {data.verifica_3 && <li>{data.verifica_3}</li>}
-              </ol>
-            </div>
-          )}
-        </div>
-
-        {/* Footer */}
-        <div className="bg-gray-50 border-t px-6 py-3 flex justify-between text-xs text-gray-600">
-          <div>
-            <strong>Autore:</strong> {currentDoc.autore || '—'}
-          </div>
-          <div>
-            <strong>Versione:</strong> v{currentDoc.versione || 1} · <strong>Stato:</strong> {currentDoc.stato}
-          </div>
-          <div>
-            {currentDoc.created_at && new Date(currentDoc.created_at).toLocaleDateString('it-IT')}
-          </div>
-        </div>
-      </div>
-
-      {editorOpen && (
-        <OplImageEditor
-          documento={currentDoc}
-          imageBlobUrl={imageBlobUrl}
-          onClose={() => setEditorOpen(false)}
-          onSaved={handleAnnotationsSaved}
-        />
-      )}
-    </div>
-  )
-}
-
-// ─────────────────────────────────────────────────────────────
-// AnnotatedImage: mostra immagine + annotazioni (read-only)
-// ─────────────────────────────────────────────────────────────
-
-function AnnotatedImage({ imageUrl, annotations }) {
-  const [imgSize, setImgSize] = useState({ w: 0, h: 0 })
-  const imgRef = useRef(null)
-
-  function onImgLoad(e) {
-    setImgSize({
-      w: e.target.naturalWidth,
-      h: e.target.naturalHeight,
-    })
-  }
-
-  return (
-    <div className="relative inline-block max-w-full">
-      {React.createElement('img', {
-        ref: imgRef,
-        src: imageUrl,
-        alt: 'OPL',
-        onLoad: onImgLoad,
-        className: 'max-w-full max-h-96 object-contain block',
-      })}
-      {imgSize.w > 0 && annotations.length > 0 && (
-        <svg
-          viewBox={`0 0 ${imgSize.w} ${imgSize.h}`}
-          className="absolute top-0 left-0 w-full h-full pointer-events-none"
-          preserveAspectRatio="xMidYMid meet"
-        >
-          {annotations.map(ann => (
-            <AnnotationSvg key={ann.id} annotation={ann} />
-          ))}
-        </svg>
-      )}
-    </div>
-  )
-}
-
-function AnnotationSvg({ annotation }) {
-  const { x, y, width, height, rotation = 0 } = annotation
-  const cx = x + width / 2
-  const cy = y + height / 2
-  const transform = rotation ? `rotate(${rotation} ${cx} ${cy})` : undefined
-  const r = Math.min(width, height) / 2
-
-  // Immagine custom caricata dall'utente
-  if (annotation.symbolId === '__custom_image__' && annotation.imageData) {
-    return React.createElement('image', {
-      href: annotation.imageData,
-      x: x,
-      y: y,
-      width: width,
-      height: height,
-      transform: transform,
-      preserveAspectRatio: 'none',
-    })
-  }
-
-  const symbol = OPL_SYMBOLS.find(s => s.id === annotation.symbolId)
-  if (!symbol) return null
-
-  if (symbol.type === 'text') {
-    return (
-      <text
-        x={cx}
-        y={cy}
-        fill={symbol.color}
-        fontSize={symbol.fontSize}
-        fontWeight={symbol.fontStyle === 'bold' ? 'bold' : 'normal'}
-        textAnchor="middle"
-        dominantBaseline="middle"
-        transform={transform}
-      >
-        {annotation.text || symbol.text}
-      </text>
-    )
-  }
-
-  if (symbol.render === 'ko_circle') {
-    return (
-      <g transform={transform}>
-        <circle cx={cx} cy={cy} r={r} fill="#DC2626" stroke="#7F1D1D" strokeWidth="3" />
-        <text x={cx} y={cy} fill="white" fontSize={height * 0.6} fontWeight="bold" textAnchor="middle" dominantBaseline="central">✕</text>
-      </g>
-    )
-  }
-  if (symbol.render === 'ok_circle') {
-    return (
-      <g transform={transform}>
-        <circle cx={cx} cy={cy} r={r} fill="#16A34A" stroke="#14532D" strokeWidth="3" />
-        <text x={cx} y={cy} fill="white" fontSize={height * 0.6} fontWeight="bold" textAnchor="middle" dominantBaseline="central">✓</text>
-      </g>
-    )
-  }
-  if (symbol.render === 'warning') {
-    const points = [
-      [cx, y],
-      [x + width, y + height],
-      [x, y + height],
-    ].map(p => p.join(',')).join(' ')
-    return (
-      <g transform={transform}>
-        <polygon points={points} fill="#FBBF24" stroke="#000" strokeWidth="3" />
-        <text x={cx} y={cy + height * 0.15} fill="black" fontSize={height * 0.5} fontWeight="bold" textAnchor="middle" dominantBaseline="middle">!</text>
-      </g>
-    )
-  }
-  if (symbol.render === 'info') {
-    return (
-      <g transform={transform}>
-        <circle cx={cx} cy={cy} r={r} fill="#2563EB" stroke="#1E3A8A" strokeWidth="3" />
-        <text x={cx} y={cy} fill="white" fontSize={height * 0.6} fontWeight="bold" fontStyle="italic" textAnchor="middle" dominantBaseline="central">i</text>
-      </g>
-    )
-  }
-  if (symbol.render === 'arrow') {
-    const c = symbol.color || '#DC2626'
-    const bodyH = height * 0.5
-    const headW = width * 0.4
-    const points = [
-      [x + headW, y + (height - bodyH) / 2],
-      [x + width, y + (height - bodyH) / 2],
-      [x + width, y + (height + bodyH) / 2],
-      [x + headW, y + (height + bodyH) / 2],
-      [x + headW, y + height],
-      [x, y + height / 2],
-      [x + headW, y],
-      [x + headW, y + (height - bodyH) / 2],
-    ].map(p => p.join(',')).join(' ')
-    return (
-      <g transform={transform}>
-        <polygon points={points} fill={c} stroke="#000" strokeWidth="2" />
-      </g>
-    )
-  }
-  if (symbol.render === 'rect') {
-    return (
-      <rect
-        x={x}
-        y={y}
-        width={width}
-        height={height}
-        fill="none"
-        stroke={symbol.color}
-        strokeWidth="5"
-        rx="4"
-        transform={transform}
-      />
-    )
-  }
-  if (symbol.render === 'circle') {
-    return (
-      <circle
-        cx={cx}
-        cy={cy}
-        r={r}
-        fill="none"
-        stroke={symbol.color}
-        strokeWidth="5"
-        transform={transform}
-      />
-    )
-  }
-  if (symbol.type === 'icon') {
-    const isHazard = symbol.category === 'hazard'
-    if (isHazard) {
-      const points = [
-        [cx, y],
-        [x + width, y + height],
-        [x, y + height],
-      ].map(p => p.join(',')).join(' ')
-      return (
-        <g transform={transform}>
-          <polygon points={points} fill={symbol.color} stroke="#000" strokeWidth="3" />
-          <text x={cx} y={cy + height * 0.15} fontSize={height * 0.5} textAnchor="middle" dominantBaseline="middle">{symbol.preview}</text>
-        </g>
-      )
-    }
-    return (
-      <g transform={transform}>
-        <circle cx={cx} cy={cy} r={r} fill={symbol.color} stroke="#000" strokeWidth="3" />
-        <text x={cx} y={cy} fontSize={height * 0.5} textAnchor="middle" dominantBaseline="central">{symbol.preview}</text>
-      </g>
-    )
-  }
-
-  return null
-}
-
-function MetaBadge({ label, value }) {
-  return (
-    <div className="bg-white bg-opacity-70 rounded px-2 py-1">
-      <div className="text-[9px] uppercase font-bold text-yellow-900">{label}</div>
-      <div className="text-sm font-medium text-gray-800 truncate">{value}</div>
-    </div>
-  )
-}
-
-function OplBox({ title, content, bgColor, borderColor, textColor, icon }) {
-  return (
-    <div className={`${bgColor} border-2 ${borderColor} rounded-lg p-4`}>
-      <div className={`font-bold ${textColor} mb-2 flex items-center gap-1 text-sm uppercase`}>
-        <span>{icon}</span> {title}
-      </div>
-      <div className={`text-sm ${textColor} whitespace-pre-wrap min-h-[60px]`}>
-        {content || <span className="italic opacity-50">Non compilato</span>}
-      </div>
-    </div>
-  )
-}
-
