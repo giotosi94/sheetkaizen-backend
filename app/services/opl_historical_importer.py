@@ -159,6 +159,30 @@ def number_from_value(value, filename):
             return original, f"OPL-{base_number}", base_number
     return "", "", None
 
+def resolve_opl_type(worksheet, extracted_value):
+    sheet_name = normalize_key(worksheet.title)
+
+    if "CONOSCENZA BASE" in sheet_name:
+        return "Conoscenza di Base"
+
+    if "MIGLIORAMENTO" in sheet_name:
+        return "Miglioramento"
+
+    if "PROBLEMA" in sheet_name:
+        return "Problema"
+
+    extracted_key = normalize_key(extracted_value)
+
+    if "CONOSCENZA BASE" in extracted_key:
+        return "Conoscenza di Base"
+
+    if extracted_key == "MIGLIORAMENTO":
+        return "Miglioramento"
+
+    if extracted_key == "PROBLEMA":
+        return "Problema"
+
+    return ""
 
 def normalize_department(value):
     original = normalize_text(value)
@@ -224,6 +248,7 @@ def analyze_excel(contents, filename, include_preview=True):
     reparto = normalize_department(extracted["reparto_originale"])
     linea = normalize_line(extracted["linea_originale"])
     data_documento = find_date(worksheet)
+    tipo_opl = resolve_opl_type(worksheet, extracted["tipo_opl"])
     warnings = []
     if not numero:
         warnings.append("Numero OPL non riconosciuto")
@@ -233,7 +258,18 @@ def analyze_excel(contents, filename, include_preview=True):
         warnings.append("Reparto non riconosciuto")
     if not linea:
         warnings.append("Linea non riconosciuta")
-    recognized = sum(bool(value) for value in [numero, extracted["titolo"], reparto, linea, extracted["area_opl"], extracted["tipo_opl"], data_documento])
+    recognized = sum(
+    bool(value)
+    for value in [
+        numero,
+        extracted["titolo"],
+        reparto,
+        linea,
+        extracted["area_opl"],
+        tipo_opl,
+        data_documento,
+    ]
+)
     confidence = round((recognized / 7) * 100, 1)
     return {
         "filename": filename,
@@ -245,7 +281,7 @@ def analyze_excel(contents, filename, include_preview=True):
         "reparto": reparto,
         "linea": linea,
         "area_opl": extracted["area_opl"],
-        "tipo_opl": extracted["tipo_opl"],
+        "tipo_opl": tipo_opl,
         "data_documento": data_documento,
         "confidence": confidence,
         "warnings": warnings,
