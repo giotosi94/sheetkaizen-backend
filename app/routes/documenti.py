@@ -14,6 +14,7 @@ from app.database import db
 from app.models.documento import DocumentoCreate, DocumentoUpdate
 from app.utils.compressor import compress_file
 from app.middleware.auth import get_current_user
+from app.services.opl_historical_importer import analyze_excel
 
 router = APIRouter()
 
@@ -119,6 +120,63 @@ async def get_stats():
             results[tipo] = {}
         results[tipo][stato] = item["count"]
     return results
+
+
+
+
+def _require_admin(current_user: dict):
+    role = str(current_user.get("role") or current_user.get("ruolo") or "").strip().lower()
+    if role not in {"admin", "administrator", "amministratore"}:
+        raise HTTPException(status_code=403, detail="Funzione riservata agli amministratori")
+
+
+@router.post("/historical-opl/analyze")
+async def analyze_historical_opl(
+    files: list[UploadFile] = File(...),
+    current_user: dict = Depends(get_current_user),
+):
+    _require_admin(current_user)
+
+    if not files:
+        raise HTTPException(status_code=400, detail="Seleziona almeno un file Excel")
+    if len(files) > 5:
+        raise HTTPException(status_code=400, detail="Per il POC puoi analizzare massimo 5 file alla volta")
+
+    results = []
+    for file in files:
+        filename = file.filename or "file.xlsx"
+        extension = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
+        if extension not in {"xlsx", "xlsm"}:
+            results.append({
+                "filename": filename,
+                "error": "Formato non supportato nel POC. Usa .xlsx o .xlsm",
+            })
+            continue
+
+        contents = await file.read()
+        if len(contents) > 25 * 1024 * 1024:
+            results.append({
+                "filename": filename,
+                "error": "File troppo grande per il POC (max 25 MB)",
+            })
+            continue
+
+        try:
+            result = analyze_excel(contents, filename, include_preview=True)
+            results.append(result)
+        except Exception as error:
+            results.append({
+                "filename": filename,
+                "error": str(error),
+            })
+
+    return {
+        "items": results,
+        "count": len(results),
+        "success": sum(1 for item in results if not item.get("error")),
+        "errors": sum(1 for item in results if item.get("error")),
+        "mode": "analysis_only",
+    }
 
 
 @router.get("/{documento_id}")
