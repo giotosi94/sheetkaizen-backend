@@ -52,21 +52,21 @@ def get_bucket():
 
 
 async def get_next_numero(tipo: str):
-    """Genera codice progressivo tipo OPL-0001, SOP-0042."""
     prefix = tipo.upper()
-    last = await db.documenti.find_one(
-        {"tipo": tipo},
-        sort=[("created_at", -1)]
+    max_number = 0
+    cursor = db.documenti.find(
+        {"tipo": tipo, "numero": {"$regex": f"^{prefix}-[0-9]+$", "$options": "i"}},
+        {"numero": 1, "numero_progressivo": 1},
     )
-    if last and "numero" in last:
-        try:
-            num = int(last["numero"].split("-")[1]) + 1
-        except (IndexError, ValueError):
-            num = 1
-    else:
-        num = 1
-    return f"{prefix}-{num:04d}"
-
+    async for document in cursor:
+        progressivo = document.get("numero_progressivo")
+        if isinstance(progressivo, int):
+            max_number = max(max_number, progressivo)
+            continue
+        match = re.fullmatch(rf"{re.escape(prefix)}-([0-9]+)", str(document.get("numero", "")), re.IGNORECASE)
+        if match:
+            max_number = max(max_number, int(match.group(1)))
+    return f"{prefix}-{max_number + 1}"
 
 # ============================================================
 # LIST + DETAIL
@@ -130,39 +130,37 @@ def _require_admin(current_user: dict):
         raise HTTPException(status_code=403, detail="Funzione riservata agli amministratori")
 
 
+@router.get("/next-number/{tipo}")
+async def get_next_document_number(tipo: str, current_user: dict = Depends(get_current_user)):
+    if tipo.upper() == "OPL":
+        _require_admin(current_user)
+    numero = await get_next_numero(tipo.upper())
+    return {"tipo": tipo.upper(), "numero": numero}
+
+
 @router.post("/historical-opl/analyze")
 async def analyze_historical_opl(
     files: list[UploadFile] = File(...),
     current_user: dict = Depends(get_current_user),
 ):
     _require_admin(current_user)
-
     if not files:
         raise HTTPException(status_code=400, detail="Seleziona almeno un file Excel")
     if len(files) > 5:
-        raise HTTPException(status_code=400, detail="Per il POC puoi analizzare massimo 5 file alla volta")
+        raise HTTPException(status_code=400, detail="Puoi analizzare massimo 5 file alla volta")
 
     results = []
-
     for file in files:
         filename = file.filename or "file.xlsx"
         extension = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
-
         if extension not in {"xlsx", "xlsm"}:
-            results.append({
-                "filename": filename,
-                "error": "Formato non supportato nel POC. Usa .xlsx o .xlsm",
-            })
+            results.append({"filename": filename, "error": "Formato non supportato. Usa .xlsx o .xlsm"})
             continue
 
         contents = await file.read()
         original_size = len(contents)
-
         if original_size > 50 * 1024 * 1024:
-            results.append({
-                "filename": filename,
-                "error": "File troppo grande (max 50 MB)",
-            })
+            results.append({"filename": filename, "error": "File troppo grande (max 50 MB)"})
             continue
 
         try:
@@ -171,58 +169,47 @@ async def analyze_historical_opl(
                 filename,
                 file.content_type or "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             )
-
             analysis_contents = compressed_contents
             analysis_filename = compressed_filename
-            compression_warning = None
-
             try:
-                result = analyze_excel(
-                    analysis_contents,
-                    analysis_filename,
-                    include_preview=True,
-                )
-            except Exception as compressed_error:
-                if compressed_contents == contents:
-                    raise compressed_error
-
+                result = analyze_excel(analysis_contents, analysis_filename, include_preview=True)
+            except Exception:
                 analysis_contents = contents
                 analysis_filename = filename
-                compression_warning = "Compressione non compatibile con questo file: analizzato l'originale"
-                result = analyze_excel(
-                    analysis_contents,
-                    analysis_filename,
-                    include_preview=True,
-                )
+                result = analyze_excel(analysis_contents, analysis_filename, include_preview=True)
+                result.setdefault("warnings", []).append("Analizzato il file originale perché la versione compressa non era leggibile")
+
+            existing = None
+            if result.get("numero"):
+                existing = await db.documenti.find_one({"numero": result["numero"], "is_active": {"$ne": False}}, {"_id": 1})
 
             final_size = len(analysis_contents)
             saved_bytes = max(0, original_size - final_size)
-            saved_pct = round((saved_bytes / original_size) * 100, 1) if original_size else 0
-
-            result["filename"] = filename
-            result["compressed_filename"] = analysis_filename
-            result["compressione"] = compression_info or {}
-            result["original_size"] = original_size
-            result["final_size"] = final_size
-            result["saved_bytes"] = saved_bytes
-            result["saved_pct"] = saved_pct
-            result["compression_applied"] = final_size < original_size
-
-            if compression_warning:
-                result.setdefault("warnings", []).append(compression_warning)
-
+            result.update({
+                "filename": filename,
+                "compressed_filename": analysis_filename,
+                "compressione": compression_info or {},
+                "original_size": original_size,
+                "final_size": final_size,
+                "saved_bytes": saved_bytes,
+                "saved_pct": round((saved_bytes / original_size) * 100, 1) if original_size else 0,
+                "compression_applied": final_size < original_size,
+                "duplicate": existing is not None,
+                "duplicate_id": str(existing["_id"]) if existing else None,
+            })
+            if existing:
+                result.setdefault("warnings", []).append(f"Codifica {result['numero']} già presente")
             results.append(result)
         except Exception as error:
-            results.append({
-                "filename": filename,
-                "error": str(error),
-            })
+            results.append({"filename": filename, "error": str(error)})
 
+    next_number = await get_next_numero("OPL")
     return {
         "items": results,
         "count": len(results),
         "success": sum(1 for item in results if not item.get("error")),
         "errors": sum(1 for item in results if item.get("error")),
+        "next_number": next_number,
         "mode": "analysis_only",
     }
 
@@ -296,6 +283,7 @@ async def upload_documento(
         "tag": tag_list,
         "stato": "Bozza",
         "versione": 1,
+        "numero_progressivo": int(numero.split("-", 1)[1]) if numero.split("-", 1)[1].isdigit() else None,
         "file_id": str(file_id),
         "file_name": final_filename,
         "file_name_originale": file.filename,
@@ -841,6 +829,7 @@ async def create_opl_nativa(payload: OplNativaPayload):
         "tag": ["opl-nativa"],
         "stato": "Bozza",
         "versione": 1,
+        "numero_progressivo": int(numero.split("-", 1)[1]),
 
         # File (solo immagine)
         "file_id": file_id,
