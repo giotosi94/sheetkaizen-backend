@@ -143,9 +143,11 @@ async def analyze_historical_opl(
         raise HTTPException(status_code=400, detail="Per il POC puoi analizzare massimo 5 file alla volta")
 
     results = []
+
     for file in files:
         filename = file.filename or "file.xlsx"
         extension = filename.lower().rsplit(".", 1)[-1] if "." in filename else ""
+
         if extension not in {"xlsx", "xlsm"}:
             results.append({
                 "filename": filename,
@@ -154,15 +156,61 @@ async def analyze_historical_opl(
             continue
 
         contents = await file.read()
-        if len(contents) > 25 * 1024 * 1024:
+        original_size = len(contents)
+
+        if original_size > 50 * 1024 * 1024:
             results.append({
                 "filename": filename,
-                "error": "File troppo grande per il POC (max 25 MB)",
+                "error": "File troppo grande (max 50 MB)",
             })
             continue
 
         try:
-            result = analyze_excel(contents, filename, include_preview=True)
+            compressed_contents, compressed_filename, compression_info = compress_file(
+                contents,
+                filename,
+                file.content_type or "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+
+            analysis_contents = compressed_contents
+            analysis_filename = compressed_filename
+            compression_warning = None
+
+            try:
+                result = analyze_excel(
+                    analysis_contents,
+                    analysis_filename,
+                    include_preview=True,
+                )
+            except Exception as compressed_error:
+                if compressed_contents == contents:
+                    raise compressed_error
+
+                analysis_contents = contents
+                analysis_filename = filename
+                compression_warning = "Compressione non compatibile con questo file: analizzato l'originale"
+                result = analyze_excel(
+                    analysis_contents,
+                    analysis_filename,
+                    include_preview=True,
+                )
+
+            final_size = len(analysis_contents)
+            saved_bytes = max(0, original_size - final_size)
+            saved_pct = round((saved_bytes / original_size) * 100, 1) if original_size else 0
+
+            result["filename"] = filename
+            result["compressed_filename"] = analysis_filename
+            result["compressione"] = compression_info or {}
+            result["original_size"] = original_size
+            result["final_size"] = final_size
+            result["saved_bytes"] = saved_bytes
+            result["saved_pct"] = saved_pct
+            result["compression_applied"] = final_size < original_size
+
+            if compression_warning:
+                result.setdefault("warnings", []).append(compression_warning)
+
             results.append(result)
         except Exception as error:
             results.append({
