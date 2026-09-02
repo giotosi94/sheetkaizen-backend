@@ -786,10 +786,12 @@ class OplNativaPayload(BaseModel):
     linea: Optional[str] = None
     macchina: Optional[str] = None
     autore: Optional[str] = None
+    layout: Optional[str] = "single"
     problema: Optional[str] = ""
     causa: Optional[str] = ""
     miglioramento: Optional[str] = ""
     immagine_base64: Optional[str] = None
+    immagini: list = []
     verifica_1: Optional[str] = ""
     verifica_2: Optional[str] = ""
     verifica_3: Optional[str] = ""
@@ -850,6 +852,8 @@ async def create_opl_nativa(payload: OplNativaPayload):
             "area_opl_label": payload.area_opl_label,
             "tipo_opl_id": payload.tipo_opl_id,
             "tipo_opl_label": payload.tipo_opl_label,
+            "layout": payload.layout or "single",
+            "immagini": payload.immagini or [],
             "problema": payload.problema or "",
             "causa": payload.causa or "",
             "miglioramento": payload.miglioramento or "",
@@ -940,6 +944,7 @@ async def update_opl_nativa(documento_id: str, payload: OplNativaPayload):
 
 class OplAnnotationsPayload(BaseModel):
     annotations: list = []
+    immagini: Optional[list] = None
 
 
 @router.patch("/{documento_id}/opl-annotations")
@@ -950,15 +955,8 @@ async def update_opl_annotations(documento_id: str, payload: OplAnnotationsPaylo
 
     opl_data = existing.get("opl_data", {}) or {}
     opl_data["annotations"] = payload.annotations or []
-
-    await db.documenti.update_one(
-        {"_id": ObjectId(documento_id)},
-        {"$set": {
-            "opl_data": opl_data,
-            "updated_at": datetime.now(timezone.utc),
-        }}
-    )
-    return {"message": "Annotazioni salvate", "count": len(payload.annotations or [])}
+    if payload.immagini is not None:
+        opl_data["immagini"] = payload.immagini
 
 
 from fastapi import Request
