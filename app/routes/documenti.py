@@ -213,6 +213,128 @@ async def analyze_historical_opl(
         "mode": "analysis_only",
     }
 
+class HistoricalOplItem(BaseModel):
+    numero: str
+    numero_originale: Optional[str] = None
+    numero_progressivo: Optional[int] = None
+    titolo: Optional[str] = ""
+    reparto: Optional[str] = None
+    linea: Optional[str] = None
+    area_opl: Optional[str] = None
+    tipo_opl: Optional[str] = None
+    data_documento: Optional[str] = None
+    image_base64: Optional[str] = None
+
+
+class HistoricalOplImportPayload(BaseModel):
+    items: list[HistoricalOplItem] = []
+
+
+@router.post("/historical-opl/import")
+async def import_historical_opl(
+    payload: HistoricalOplImportPayload,
+    current_user: dict = Depends(get_current_user),
+):
+    _require_admin(current_user)
+
+    if not payload.items:
+        raise HTTPException(status_code=400, detail="Nessuna OPL da importare")
+
+    bucket = get_bucket()
+    now = datetime.now(timezone.utc)
+    created = []
+    skipped = []
+
+    for item in payload.items:
+        numero = (item.numero or "").strip()
+        if not numero:
+            skipped.append({"numero": item.numero, "motivo": "Numero mancante"})
+            continue
+
+        esistente = await db.documenti.find_one(
+            {"numero": numero, "is_active": {"$ne": False}},
+            {"_id": 1},
+        )
+        if esistente:
+            skipped.append({"numero": numero, "motivo": "Codifica gia presente"})
+            continue
+
+        progressivo = item.numero_progressivo
+        if progressivo is None:
+            match = re.fullmatch(r"OPL-([0-9]+)", numero, re.IGNORECASE)
+            progressivo = int(match.group(1)) if match else None
+
+        file_id = None
+        file_size = 0
+        if item.image_base64:
+            try:
+                raw = item.image_base64
+                if raw.startswith("data:"):
+                    raw = raw.split(",", 1)[1]
+                image_bytes = base64.b64decode(raw)
+                file_size = len(image_bytes)
+                file_id = await bucket.upload_from_stream(
+                    f"{numero}_screen.png",
+                    image_bytes,
+                    metadata={
+                        "content_type": "image/png",
+                        "uploaded_at": now.isoformat(),
+                        "source": "historical_excel_import",
+                    },
+                )
+                file_id = str(file_id)
+            except Exception:
+                file_id = None
+                file_size = 0
+
+        doc = {
+            "numero": numero,
+            "numero_progressivo": progressivo,
+            "numero_originale": item.numero_originale or numero,
+            "titolo": item.titolo or numero,
+            "tipo": "OPL",
+            "formato": "nativa",
+            "categoria": item.area_opl or "Produzione",
+            "reparto": item.reparto,
+            "linea": item.linea,
+            "macchina": None,
+            "autore": None,
+            "descrizione": "",
+            "tag": ["opl-storica"],
+            "stato": "Approvato",
+            "versione": 1,
+            "file_id": file_id,
+            "file_name": f"{numero}_screen.png" if file_id else None,
+            "file_size": file_size,
+            "file_content_type": "image/png" if file_id else None,
+            "opl_data": {
+                "area_opl_label": item.area_opl or None,
+                "tipo_opl_label": item.tipo_opl or None,
+                "data_documento": item.data_documento or None,
+                "problema": "",
+                "causa": "",
+                "miglioramento": "",
+            },
+            "versioni_precedenti": [],
+            "kaizen_collegati": [],
+            "source": "historical_excel_import",
+            "is_active": True,
+            "created_at": now,
+            "updated_at": now,
+        }
+
+        result = await db.documenti.insert_one(doc)
+        created.append({"id": str(result.inserted_id), "numero": numero})
+
+    next_number = await get_next_numero("OPL")
+    return {
+        "created": created,
+        "skipped": skipped,
+        "created_count": len(created),
+        "skipped_count": len(skipped),
+        "next_number": next_number,
+    }
+
 
 @router.get("/{documento_id}")
 async def get_documento(documento_id: str):
