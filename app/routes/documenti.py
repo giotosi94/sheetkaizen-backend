@@ -6,9 +6,12 @@ from datetime import datetime, timezone
 from typing import Optional
 import io
 import os
+import re
+import base64
 import hmac
 import hashlib
 import time
+from pydantic import BaseModel
 
 from app.database import db
 from app.models.documento import DocumentoCreate, DocumentoUpdate
