@@ -1,4 +1,3 @@
-import base64
 import io
 import re
 import unicodedata
@@ -31,6 +30,8 @@ KNOWN_LABELS = {
     "COMPILATO DA", "REPARTO", "LINEA", "PROBLEMA", "CAUSA", "MIGLIORAMENTO",
     "DATA", "VERIFICA DELL APPRENDIMENTO", "AREA OPL", "AREA OPL COLORE BORDO",
 }
+
+MAX_COLUMN = 12  # colonna L
 
 
 def normalize_text(value):
@@ -195,69 +196,33 @@ def normalize_line(value):
     return original.title() if original else ""
 
 
-def _image_bytes(image):
-    for attr in ("_data", "ref"):
-        source = getattr(image, attr, None)
-        if source is None:
-            continue
+def trim_workbook(contents, selected_sheet):
+    """Tiene solo il foglio OPL e le colonne fino alla L, poi restituisce i byte."""
+    workbook = load_workbook(io.BytesIO(contents))
+
+    for name in list(workbook.sheetnames):
+        if name != selected_sheet:
+            del workbook[name]
+
+    worksheet = workbook[selected_sheet]
+    worksheet.sheet_state = "visible"
+
+    max_column = worksheet.max_column or 0
+    if max_column > MAX_COLUMN:
+        worksheet.delete_cols(MAX_COLUMN + 1, max_column - MAX_COLUMN)
+
+    for image in list(getattr(worksheet, "_images", []) or []):
         try:
-            if callable(source):
-                data = source()
-            elif hasattr(source, "read"):
-                position = source.tell() if hasattr(source, "tell") else None
-                data = source.read()
-                if position is not None:
-                    source.seek(position)
-            elif isinstance(source, (bytes, bytearray)):
-                data = bytes(source)
-            else:
-                with open(source, "rb") as file_handle:
-                    data = file_handle.read()
-            if data:
-                return bytes(data)
+            anchor = getattr(image, "anchor", None)
+            col_index = getattr(getattr(anchor, "_from", None), "col", None)
+            if isinstance(col_index, int) and col_index >= MAX_COLUMN:
+                worksheet._images.remove(image)
         except Exception:
             continue
-    return None
 
-
-def extract_main_image(contents, selected_sheet):
-    try:
-        workbook = load_workbook(io.BytesIO(contents), data_only=True, read_only=False)
-    except Exception:
-        return None
-
-    worksheet = None
-    for candidate in workbook.worksheets:
-        if candidate.title == selected_sheet:
-            worksheet = candidate
-            break
-    if worksheet is None:
-        return None
-
-    best_data = None
-    best_score = -1
-    best_format = "png"
-
-    for image in getattr(worksheet, "_images", []) or []:
-        data = _image_bytes(image)
-        if not data:
-            continue
-        width = getattr(image, "width", None) or 0
-        height = getattr(image, "height", None) or 0
-        area = width * height
-        score = area if area else len(data)
-        if score > best_score:
-            best_score = score
-            best_data = data
-            best_format = (getattr(image, "format", None) or "png").lower()
-
-    if not best_data:
-        return None
-
-    mime = "jpeg" if best_format in {"jpg", "jpeg"} else best_format
-    if mime not in {"png", "jpeg", "gif", "bmp", "webp"}:
-        mime = "png"
-    return f"data:image/{mime};base64," + base64.b64encode(best_data).decode("ascii")
+    output = io.BytesIO()
+    workbook.save(output)
+    return output.getvalue()
 
 
 def analyze_excel(contents, filename, include_preview=True):
@@ -279,10 +244,6 @@ def analyze_excel(contents, filename, include_preview=True):
         warnings.append("Reparto non riconosciuto")
     if not linea:
         warnings.append("Linea non riconosciuta")
-
-    image_base64 = extract_main_image(contents, worksheet.title) if include_preview else None
-    if include_preview and not image_base64:
-        warnings.append("Nessuna immagine incorporata trovata nel foglio")
 
     recognized = sum(
         bool(value)
@@ -312,6 +273,4 @@ def analyze_excel(contents, filename, include_preview=True):
         "data_documento": data_documento,
         "confidence": confidence,
         "warnings": warnings,
-        "preview": image_base64,
-        "image_base64": image_base64,
     }
