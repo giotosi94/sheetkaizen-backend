@@ -1,12 +1,8 @@
 import base64
 import io
 import re
-import shutil
-import subprocess
-import tempfile
 import unicodedata
 from datetime import date, datetime
-from pathlib import Path
 
 from openpyxl import load_workbook
 
@@ -159,30 +155,24 @@ def number_from_value(value, filename):
             return original, f"OPL-{base_number}", base_number
     return "", "", None
 
+
 def resolve_opl_type(worksheet, extracted_value):
     sheet_name = normalize_key(worksheet.title)
-
     if "CONOSCENZA BASE" in sheet_name:
         return "Conoscenza di Base"
-
     if "MIGLIORAMENTO" in sheet_name:
         return "Miglioramento"
-
     if "PROBLEMA" in sheet_name:
         return "Problema"
-
     extracted_key = normalize_key(extracted_value)
-
     if "CONOSCENZA BASE" in extracted_key:
         return "Conoscenza di Base"
-
     if extracted_key == "MIGLIORAMENTO":
         return "Miglioramento"
-
     if extracted_key == "PROBLEMA":
         return "Problema"
-
     return ""
+
 
 def normalize_department(value):
     original = normalize_text(value)
@@ -205,39 +195,69 @@ def normalize_line(value):
     return original.title() if original else ""
 
 
-def render_sheet(contents, filename, selected_sheet):
-    if not shutil.which("libreoffice") or not shutil.which("pdftoppm"):
+def _image_bytes(image):
+    for attr in ("_data", "ref"):
+        source = getattr(image, attr, None)
+        if source is None:
+            continue
+        try:
+            if callable(source):
+                data = source()
+            elif hasattr(source, "read"):
+                position = source.tell() if hasattr(source, "tell") else None
+                data = source.read()
+                if position is not None:
+                    source.seek(position)
+            elif isinstance(source, (bytes, bytearray)):
+                data = bytes(source)
+            else:
+                with open(source, "rb") as file_handle:
+                    data = file_handle.read()
+            if data:
+                return bytes(data)
+        except Exception:
+            continue
+    return None
+
+
+def extract_main_image(contents, selected_sheet):
+    try:
+        workbook = load_workbook(io.BytesIO(contents), data_only=True, read_only=False)
+    except Exception:
         return None
-    with tempfile.TemporaryDirectory() as temp_dir:
-        temp = Path(temp_dir)
-        source = temp / Path(filename).name
-        source.write_bytes(contents)
-        workbook = load_workbook(source)
-        for worksheet in workbook.worksheets:
-            worksheet.sheet_state = "visible" if worksheet.title == selected_sheet else "hidden"
-        workbook.active = workbook.sheetnames.index(selected_sheet)
-        prepared = temp / f"prepared_{source.name}"
-        workbook.save(prepared)
-        subprocess.run(
-            ["libreoffice", "--headless", "--convert-to", "pdf", "--outdir", str(temp), str(prepared)],
-            capture_output=True,
-            timeout=90,
-            check=False,
-        )
-        pdf = temp / f"{prepared.stem}.pdf"
-        if not pdf.exists():
-            return None
-        output = temp / "preview"
-        subprocess.run(
-            ["pdftoppm", "-f", "1", "-singlefile", "-png", "-r", "120", str(pdf), str(output)],
-            capture_output=True,
-            timeout=90,
-            check=False,
-        )
-        png = temp / "preview.png"
-        if not png.exists():
-            return None
-        return "data:image/png;base64," + base64.b64encode(png.read_bytes()).decode("ascii")
+
+    worksheet = None
+    for candidate in workbook.worksheets:
+        if candidate.title == selected_sheet:
+            worksheet = candidate
+            break
+    if worksheet is None:
+        return None
+
+    best_data = None
+    best_score = -1
+    best_format = "png"
+
+    for image in getattr(worksheet, "_images", []) or []:
+        data = _image_bytes(image)
+        if not data:
+            continue
+        width = getattr(image, "width", None) or 0
+        height = getattr(image, "height", None) or 0
+        area = width * height
+        score = area if area else len(data)
+        if score > best_score:
+            best_score = score
+            best_data = data
+            best_format = (getattr(image, "format", None) or "png").lower()
+
+    if not best_data:
+        return None
+
+    mime = "jpeg" if best_format in {"jpg", "jpeg"} else best_format
+    if mime not in {"png", "jpeg", "gif", "bmp", "webp"}:
+        mime = "png"
+    return f"data:image/{mime};base64," + base64.b64encode(best_data).decode("ascii")
 
 
 def analyze_excel(contents, filename, include_preview=True):
@@ -249,6 +269,7 @@ def analyze_excel(contents, filename, include_preview=True):
     linea = normalize_line(extracted["linea_originale"])
     data_documento = find_date(worksheet)
     tipo_opl = resolve_opl_type(worksheet, extracted["tipo_opl"])
+
     warnings = []
     if not numero:
         warnings.append("Numero OPL non riconosciuto")
@@ -258,19 +279,25 @@ def analyze_excel(contents, filename, include_preview=True):
         warnings.append("Reparto non riconosciuto")
     if not linea:
         warnings.append("Linea non riconosciuta")
+
+    image_base64 = extract_main_image(contents, worksheet.title) if include_preview else None
+    if include_preview and not image_base64:
+        warnings.append("Nessuna immagine incorporata trovata nel foglio")
+
     recognized = sum(
-    bool(value)
-    for value in [
-        numero,
-        extracted["titolo"],
-        reparto,
-        linea,
-        extracted["area_opl"],
-        tipo_opl,
-        data_documento,
-    ]
-)
+        bool(value)
+        for value in [
+            numero,
+            extracted["titolo"],
+            reparto,
+            linea,
+            extracted["area_opl"],
+            tipo_opl,
+            data_documento,
+        ]
+    )
     confidence = round((recognized / 7) * 100, 1)
+
     return {
         "filename": filename,
         "sheet": worksheet.title,
@@ -285,5 +312,6 @@ def analyze_excel(contents, filename, include_preview=True):
         "data_documento": data_documento,
         "confidence": confidence,
         "warnings": warnings,
-        "preview": render_sheet(contents, filename, worksheet.title) if include_preview else None,
+        "preview": image_base64,
+        "image_base64": image_base64,
     }
