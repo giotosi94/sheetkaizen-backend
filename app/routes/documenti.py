@@ -7,6 +7,7 @@ from typing import Optional
 import io
 import os
 import re
+import json
 import base64
 import hmac
 import hashlib
@@ -17,14 +18,11 @@ from app.database import db
 from app.models.documento import DocumentoCreate, DocumentoUpdate
 from app.utils.compressor import compress_file
 from app.middleware.auth import get_current_user
-from app.services.opl_historical_importer import analyze_excel
+from app.services.opl_historical_importer import analyze_excel, trim_workbook
 
 router = APIRouter()
 
 
-# ============================================================
-# PREVIEW TOKEN HELPERS (HMAC firmato, valido 5 min)
-# ============================================================
 PREVIEW_SECRET = os.getenv("PREVIEW_TOKEN_SECRET") or os.getenv("JWT_SECRET") or "change-me-preview-secret"
 
 
@@ -49,7 +47,6 @@ def verify_preview_token(documento_id: str, token: str) -> bool:
 
 
 def get_bucket():
-    """Restituisce il bucket GridFS, garantendo connessione attiva."""
     db._ensure()
     return AsyncIOMotorGridFSBucket(db._db, bucket_name="documenti_files")
 
@@ -71,9 +68,7 @@ async def get_next_numero(tipo: str):
             max_number = max(max_number, int(match.group(1)))
     return f"{prefix}-{max_number + 1}"
 
-# ============================================================
-# LIST + DETAIL
-# ============================================================
+
 @router.get("/")
 async def get_documenti(
     tipo: Optional[str] = Query(None),
@@ -107,7 +102,6 @@ async def get_documenti(
 
 @router.get("/stats/summary")
 async def get_stats():
-    """Statistiche aggregate per la dashboard."""
     pipeline = [
         {"$match": {"is_active": {"$ne": False}}},
         {"$group": {
@@ -123,8 +117,6 @@ async def get_stats():
             results[tipo] = {}
         results[tipo][stato] = item["count"]
     return results
-
-
 
 
 def _require_admin(current_user: dict):
@@ -149,8 +141,8 @@ async def analyze_historical_opl(
     _require_admin(current_user)
     if not files:
         raise HTTPException(status_code=400, detail="Seleziona almeno un file Excel")
-    if len(files) > 5:
-        raise HTTPException(status_code=400, detail="Puoi analizzare massimo 5 file alla volta")
+    if len(files) > 10:
+        raise HTTPException(status_code=400, detail="Puoi analizzare massimo 10 file alla volta")
 
     results = []
     for file in files:
@@ -167,41 +159,22 @@ async def analyze_historical_opl(
             continue
 
         try:
-            compressed_contents, compressed_filename, compression_info = compress_file(
-                contents,
-                filename,
-                file.content_type or "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
-            analysis_contents = compressed_contents
-            analysis_filename = compressed_filename
-            try:
-                result = analyze_excel(analysis_contents, analysis_filename, include_preview=True)
-            except Exception:
-                analysis_contents = contents
-                analysis_filename = filename
-                result = analyze_excel(analysis_contents, analysis_filename, include_preview=True)
-                result.setdefault("warnings", []).append("Analizzato il file originale perché la versione compressa non era leggibile")
+            result = analyze_excel(contents, filename, include_preview=False)
 
             existing = None
             if result.get("numero"):
-                existing = await db.documenti.find_one({"numero": result["numero"], "is_active": {"$ne": False}}, {"_id": 1})
+                existing = await db.documenti.find_one(
+                    {"numero": result["numero"], "is_active": {"$ne": False}}, {"_id": 1}
+                )
 
-            final_size = len(analysis_contents)
-            saved_bytes = max(0, original_size - final_size)
             result.update({
                 "filename": filename,
-                "compressed_filename": analysis_filename,
-                "compressione": compression_info or {},
                 "original_size": original_size,
-                "final_size": final_size,
-                "saved_bytes": saved_bytes,
-                "saved_pct": round((saved_bytes / original_size) * 100, 1) if original_size else 0,
-                "compression_applied": final_size < original_size,
                 "duplicate": existing is not None,
                 "duplicate_id": str(existing["_id"]) if existing else None,
             })
             if existing:
-                result.setdefault("warnings", []).append(f"Codifica {result['numero']} già presente")
+                result.setdefault("warnings", []).append(f"Codifica {result['numero']} gia presente")
             results.append(result)
         except Exception as error:
             results.append({"filename": filename, "error": str(error)})
@@ -216,31 +189,27 @@ async def analyze_historical_opl(
         "mode": "analysis_only",
     }
 
-class HistoricalOplItem(BaseModel):
-    numero: str
-    numero_originale: Optional[str] = None
-    numero_progressivo: Optional[int] = None
-    titolo: Optional[str] = ""
-    reparto: Optional[str] = None
-    linea: Optional[str] = None
-    area_opl: Optional[str] = None
-    tipo_opl: Optional[str] = None
-    data_documento: Optional[str] = None
-    image_base64: Optional[str] = None
-
-
-class HistoricalOplImportPayload(BaseModel):
-    items: list[HistoricalOplItem] = []
-
 
 @router.post("/historical-opl/import")
 async def import_historical_opl(
-    payload: HistoricalOplImportPayload,
+    files: list[UploadFile] = File(...),
+    items: str = Form(...),
     current_user: dict = Depends(get_current_user),
 ):
     _require_admin(current_user)
 
-    if not payload.items:
+    try:
+        meta_list = json.loads(items)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Dati non validi")
+
+    meta_by_filename = {}
+    for meta in meta_list:
+        filename = (meta.get("filename") or "").strip()
+        if filename:
+            meta_by_filename[filename] = meta
+
+    if not files or not meta_by_filename:
         raise HTTPException(status_code=400, detail="Nessuna OPL da importare")
 
     bucket = get_bucket()
@@ -248,10 +217,15 @@ async def import_historical_opl(
     created = []
     skipped = []
 
-    for item in payload.items:
-        numero = (item.numero or "").strip()
+    for file in files:
+        filename = file.filename or ""
+        meta = meta_by_filename.get(filename)
+        if not meta:
+            continue
+
+        numero = (meta.get("numero") or "").strip()
         if not numero:
-            skipped.append({"numero": item.numero, "motivo": "Numero mancante"})
+            skipped.append({"filename": filename, "motivo": "Numero mancante"})
             continue
 
         esistente = await db.documenti.find_one(
@@ -262,61 +236,67 @@ async def import_historical_opl(
             skipped.append({"numero": numero, "motivo": "Codifica gia presente"})
             continue
 
-        progressivo = item.numero_progressivo
-        if progressivo is None:
+        contents = await file.read()
+        original_size = len(contents)
+
+        try:
+            trimmed = trim_workbook(contents, meta.get("sheet") or "")
+        except Exception:
+            trimmed = contents
+
+        final_filename = f"{numero}.xlsx"
+        compression_info = {}
+        try:
+            trimmed, final_filename, compression_info = compress_file(
+                trimmed,
+                f"{numero}.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        except Exception:
+            compression_info = {}
+
+        file_id = await bucket.upload_from_stream(
+            final_filename,
+            trimmed,
+            metadata={
+                "content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "uploaded_at": now.isoformat(),
+                "source": "historical_excel_import",
+            },
+        )
+
+        progressivo = meta.get("numero_progressivo")
+        if not isinstance(progressivo, int):
             match = re.fullmatch(r"OPL-([0-9]+)", numero, re.IGNORECASE)
             progressivo = int(match.group(1)) if match else None
-
-        file_id = None
-        file_size = 0
-        if item.image_base64:
-            try:
-                raw = item.image_base64
-                if raw.startswith("data:"):
-                    raw = raw.split(",", 1)[1]
-                image_bytes = base64.b64decode(raw)
-                file_size = len(image_bytes)
-                file_id = await bucket.upload_from_stream(
-                    f"{numero}_screen.png",
-                    image_bytes,
-                    metadata={
-                        "content_type": "image/png",
-                        "uploaded_at": now.isoformat(),
-                        "source": "historical_excel_import",
-                    },
-                )
-                file_id = str(file_id)
-            except Exception:
-                file_id = None
-                file_size = 0
 
         doc = {
             "numero": numero,
             "numero_progressivo": progressivo,
-            "numero_originale": item.numero_originale or numero,
-            "titolo": item.titolo or numero,
+            "numero_originale": meta.get("numero_originale") or numero,
+            "titolo": meta.get("titolo") or numero,
             "tipo": "OPL",
-            "formato": "nativa",
-            "categoria": item.area_opl or "Produzione",
-            "reparto": item.reparto,
-            "linea": item.linea,
+            "formato": "excel_storico",
+            "categoria": meta.get("area_opl") or "Produzione",
+            "reparto": meta.get("reparto"),
+            "linea": meta.get("linea"),
             "macchina": None,
             "autore": None,
             "descrizione": "",
             "tag": ["opl-storica"],
             "stato": "Approvato",
             "versione": 1,
-            "file_id": file_id,
-            "file_name": f"{numero}_screen.png" if file_id else None,
-            "file_size": file_size,
-            "file_content_type": "image/png" if file_id else None,
+            "file_id": str(file_id),
+            "file_name": final_filename,
+            "file_name_originale": filename,
+            "file_size": len(trimmed),
+            "file_size_originale": original_size,
+            "file_content_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "compressione": compression_info,
             "opl_data": {
-                "area_opl_label": item.area_opl or None,
-                "tipo_opl_label": item.tipo_opl or None,
-                "data_documento": item.data_documento or None,
-                "problema": "",
-                "causa": "",
-                "miglioramento": "",
+                "area_opl_label": meta.get("area_opl") or None,
+                "tipo_opl_label": meta.get("tipo_opl") or None,
+                "data_documento": meta.get("data_documento") or None,
             },
             "versioni_precedenti": [],
             "kaizen_collegati": [],
@@ -348,9 +328,6 @@ async def get_documento(documento_id: str):
     return doc
 
 
-# ============================================================
-# UPLOAD (nuovo documento)
-# ============================================================
 @router.post("/upload")
 async def upload_documento(
     file: UploadFile = File(...),
@@ -373,7 +350,6 @@ async def upload_documento(
     final_filename = file.filename
     compression_info = {}
 
-    # 🗜️ COMPRESSIONE AUTOMATICA
     if compress:
         contents, final_filename, compression_info = compress_file(
             contents, file.filename, file.content_type or ""
@@ -435,16 +411,12 @@ async def upload_documento(
     }
 
 
-# ============================================================
-# UPLOAD NUOVA VERSIONE
-# ============================================================
 @router.post("/{documento_id}/upload-version")
 async def upload_new_version(
     documento_id: str,
     file: UploadFile = File(...),
     compress: bool = Form(True),
 ):
-    """Carica una nuova versione di un documento esistente."""
     doc = await db.documenti.find_one({"_id": ObjectId(documento_id)})
     if not doc:
         raise HTTPException(status_code=404, detail="Documento non trovato")
@@ -457,7 +429,6 @@ async def upload_new_version(
     final_filename = file.filename
     compression_info = {}
 
-    # 🗜️ COMPRESSIONE AUTOMATICA
     if compress:
         contents, final_filename, compression_info = compress_file(
             contents, file.filename, file.content_type or ""
@@ -504,10 +475,6 @@ async def upload_new_version(
         "compressione": compression_info,
     }
 
-# ============================================================
-# BULK SMART UPLOAD — Upload multiplo con auto-parsing nomi
-# ============================================================
-import re
 
 @router.post("/bulk-upload")
 async def bulk_upload_documenti(
@@ -515,38 +482,20 @@ async def bulk_upload_documenti(
     autore: Optional[str] = Form(None),
     compress: bool = Form(True),
 ):
-    """
-    Carica N file in batch.
-    Auto-estrae tipo/numero/titolo dal nome file con convenzione:
-      TIPO-ANNO-NUM_Titolo_Documento.ext
-      Es: OPL-2026-001_Pulizia_Filtro_Bindler.pdf
-    
-    Se il nome NON rispetta la convenzione, usa il filename come titolo
-    e assegna numero progressivo automatico.
-    
-    Se il numero esiste già → crea nuova versione automaticamente.
-    """
     if not files:
         raise HTTPException(status_code=400, detail="Nessun file ricevuto")
 
     results = {
         "totale": len(files),
         "creati": [],
-        "aggiornati": [],  # nuove versioni
+        "aggiornati": [],
         "errori": [],
         "risparmio_totale_bytes": 0,
     }
-    
-    # Pattern per parsing nome file
-    # Pattern intelligente: cerca TIPO (OPL/SOP/PROC/IST) seguito da numero
-    # Esempi che riconosce:
-    #   OPL-2026-001_Pulizia.pdf
-    #   CO COZ8C P OPL 254 1 Piatto raccolta Betti.pdf
-    #   SOP 014 Avviamento Linea.docx
-    #   opl_125_pulizia.pdf
+
     pattern_smart = r"(?i)\b(OPL|SOP|PROC|IST)\b[\s_\-]*(\d{1,5})"
     tipo_map = {"OPL": "OPL", "SOP": "SOP", "PROC": "Procedura", "IST": "Istruzione"}
-    
+
     for file in files:
         try:
             contents = await file.read()
@@ -556,59 +505,47 @@ async def bulk_upload_documenti(
                     "errore": "File troppo grande (max 50MB)"
                 })
                 continue
-            
+
             original_size = len(contents)
-            
-            # 🔍 Parsing intelligente
-            # Rimuovi estensione per il parsing
+
             filename_no_ext = file.filename.rsplit(".", 1)[0] if "." in file.filename else file.filename
             ext = file.filename.rsplit(".", 1)[1].lower() if "." in file.filename else "pdf"
-            
+
             match = re.search(pattern_smart, filename_no_ext)
-            
+
             if match:
-                # ✅ Trovato TIPO + numero nel nome
                 tipo_raw = match.group(1).upper()
                 tipo = tipo_map.get(tipo_raw, "OPL")
                 numero_estratto = match.group(2)
-                numero_completo = f"{tipo_raw}-{numero_estratto.zfill(3)}"  # es: OPL-254 o OPL-001
-                
-                # Estrai titolo: rimuovi la parte "TIPO numero" e pulisci
+                numero_completo = f"{tipo_raw}-{numero_estratto.zfill(3)}"
+
                 titolo_raw = re.sub(pattern_smart, "", filename_no_ext, count=1)
-                # Rimuovi caratteri spuri all'inizio (spazi, trattini, underscore, numeri isolati iniziali)
                 titolo_raw = re.sub(r"^[\s_\-]+", "", titolo_raw)
-                # Sostituisci underscore con spazi e collassa spazi multipli
                 titolo = re.sub(r"\s+", " ", titolo_raw.replace("_", " ")).strip()
-                
-                # Se il titolo è vuoto, usa il filename completo come fallback
+
                 if not titolo:
                     titolo = filename_no_ext.replace("_", " ").strip()
-                
+
                 auto_parsed = True
             else:
-                # ⚠️ Nessun pattern trovato — usa filename come titolo
                 tipo = "OPL"
                 titolo = filename_no_ext.replace("_", " ").replace("-", " ").strip()
                 numero_completo = await get_next_numero(tipo)
                 auto_parsed = False
-           
-            # 🪣 Bucket GridFS (deve essere accessibile nel loop)
+
             bucket = get_bucket()
-            
-            # 🔍 Controllo duplicati
+
             esistente = await db.documenti.find_one({"numero": numero_completo})
-            
-            # 🗜️ Compressione
+
             final_filename = file.filename
             compression_info = {}
             if compress:
                 contents, final_filename, compression_info = compress_file(
                     contents, file.filename, file.content_type or ""
                 )
-            
+
             results["risparmio_totale_bytes"] += (original_size - len(contents))
-            
-            # 💾 Salva file su GridFS
+
             file_id = await bucket.upload_from_stream(
                 final_filename,
                 contents,
@@ -618,9 +555,8 @@ async def bulk_upload_documenti(
                     "source": "bulk_upload",
                 }
             )
-            
+
             if esistente:
-                # 🔄 NUOVA VERSIONE
                 nuova_versione = esistente.get("versione", 1) + 1
                 versioni_precedenti = esistente.get("versioni_precedenti", [])
                 versioni_precedenti.append({
@@ -629,7 +565,7 @@ async def bulk_upload_documenti(
                     "file_name": esistente.get("file_name"),
                     "data": esistente.get("updated_at"),
                 })
-                
+
                 await db.documenti.update_one(
                     {"_id": esistente["_id"]},
                     {"$set": {
@@ -654,7 +590,6 @@ async def bulk_upload_documenti(
                     "compressione": compression_info,
                 })
             else:
-                # ➕ NUOVO DOCUMENTO
                 doc = {
                     "numero": numero_completo,
                     "titolo": titolo,
@@ -693,30 +628,22 @@ async def bulk_upload_documenti(
                     "auto_parsed": auto_parsed,
                     "compressione": compression_info,
                 })
-        
+
         except Exception as e:
             results["errori"].append({
                 "filename": file.filename,
                 "errore": str(e)
             })
-    
-    # 📊 Riepilogo finale
+
     results["risparmio_totale_mb"] = round(results["risparmio_totale_bytes"] / 1024 / 1024, 2)
     results["successo"] = len(results["creati"]) + len(results["aggiornati"])
     results["fallimenti"] = len(results["errori"])
-    
+
     return results
 
-# ============================================================
-# PREVIEW TOKEN — genera token temporaneo per Office Viewer
-# ============================================================
+
 @router.post("/{documento_id}/preview-token")
 async def create_preview_token(documento_id: str, user=Depends(get_current_user)):
-    """
-    Genera un token HMAC temporaneo (5 min) usato per far scaricare il file
-    a Office Online Viewer di Microsoft senza esporre l'endpoint pubblicamente.
-    Chiamato dal frontend prima di aprire il modal preview.
-    """
     doc = await db.documenti.find_one({"_id": ObjectId(documento_id)})
     if not doc:
         raise HTTPException(status_code=404, detail="Documento non trovato")
@@ -724,11 +651,7 @@ async def create_preview_token(documento_id: str, user=Depends(get_current_user)
     return {"token": token, "expires_in": 300, "documento_id": documento_id}
 
 
-# ============================================================
-# PREVIEW — endpoint scaricato da Office Online Viewer con token
-# ============================================================
 async def _serve_preview(documento_id: str, token: str):
-    """Logica condivisa: verifica token e restituisce lo stream del file."""
     if not verify_preview_token(documento_id, token):
         raise HTTPException(status_code=401, detail="Token preview non valido o scaduto")
 
@@ -740,10 +663,6 @@ async def _serve_preview(documento_id: str, token: str):
 
 @router.get("/{documento_id}/preview.{ext}")
 async def preview_file_with_ext(documento_id: str, ext: str, token: str = Query(...)):
-    """
-    Endpoint con estensione nel path (richiesto da Office Online Viewer).
-    Esempio: /api/documenti/abc123/preview.xlsx?token=...
-    """
     doc = await _serve_preview(documento_id, token)
 
     bucket = get_bucket()
@@ -751,7 +670,6 @@ async def preview_file_with_ext(documento_id: str, ext: str, token: str = Query(
         stream = await bucket.open_download_stream(ObjectId(doc["file_id"]))
         data = await stream.read()
         filename = doc.get("file_name", f"documento.{ext}")
-        # Content-Type esplicito per Office
         content_type_map = {
             "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             "xls": "application/vnd.ms-excel",
@@ -778,16 +696,9 @@ async def preview_file_with_ext(documento_id: str, ext: str, token: str = Query(
     except Exception as e:
         raise HTTPException(status_code=404, detail=f"File non trovato: {str(e)}")
 
-# ============================================================
-# DOWNLOAD
-# ============================================================
+
 @router.get("/{documento_id}/file")
 async def download_file(documento_id: str, download: bool = False):
-    """
-    Restituisce il file del documento.
-    - download=true → Content-Disposition: attachment (forza download)
-    - download=false (default) → inline (preview nel browser)
-    """
     doc = await db.documenti.find_one({"_id": ObjectId(documento_id)})
     if not doc or not doc.get("file_id"):
         raise HTTPException(status_code=404, detail="File non trovato")
@@ -815,7 +726,6 @@ async def download_file(documento_id: str, download: bool = False):
 
 @router.get("/{documento_id}/version/{versione}")
 async def download_version(documento_id: str, versione: int):
-    """Scarica una versione precedente specifica del documento."""
     doc = await db.documenti.find_one({"_id": ObjectId(documento_id)})
     if not doc:
         raise HTTPException(status_code=404, detail="Documento non trovato")
@@ -842,9 +752,6 @@ async def download_version(documento_id: str, versione: int):
         raise HTTPException(status_code=404, detail=f"File non trovato: {str(e)}")
 
 
-# ============================================================
-# UPDATE + DELETE
-# ============================================================
 @router.put("/{documento_id}")
 async def update_documento(documento_id: str, update: DocumentoUpdate):
     update_data = {k: v for k, v in update.dict().items() if v is not None}
@@ -862,7 +769,6 @@ async def update_documento(documento_id: str, update: DocumentoUpdate):
 
 @router.delete("/{documento_id}")
 async def delete_documento(documento_id: str):
-    """Soft delete: nasconde documento ma mantiene file su GridFS."""
     await db.documenti.update_one(
         {"_id": ObjectId(documento_id)},
         {"$set": {"is_active": False, "updated_at": datetime.now(timezone.utc)}}
@@ -870,16 +776,7 @@ async def delete_documento(documento_id: str):
     return {"message": "Documento disattivato"}
 
 
-# ============================================================
-# OPL NATIVA — creazione/aggiornamento
-# ============================================================
-
-from pydantic import BaseModel
-from typing import Any
-
-
 class OplNativaPayload(BaseModel):
-    # Anagrafica
     titolo: str
     area_opl_id: Optional[str] = None
     area_opl_label: Optional[str] = None
@@ -889,14 +786,10 @@ class OplNativaPayload(BaseModel):
     linea: Optional[str] = None
     macchina: Optional[str] = None
     autore: Optional[str] = None
-
-    # Contenuto
     problema: Optional[str] = ""
     causa: Optional[str] = ""
     miglioramento: Optional[str] = ""
-    immagine_base64: Optional[str] = None  # data URL o base64 puro
-
-    # Verifica apprendimento
+    immagine_base64: Optional[str] = None
     verifica_1: Optional[str] = ""
     verifica_2: Optional[str] = ""
     verifica_3: Optional[str] = ""
@@ -904,23 +797,16 @@ class OplNativaPayload(BaseModel):
 
 @router.post("/opl-nativa")
 async def create_opl_nativa(payload: OplNativaPayload):
-    """
-    Crea una OPL Nativa (record strutturato, no file esterno).
-    Il documento risultante ha tipo='OPL' e formato='nativa' per distinguerlo
-    dalle OPL caricate come file.
-    """
     numero = await get_next_numero("OPL")
 
-    # Gestione immagine: se base64 → salva su GridFS
     file_id = None
     file_size = 0
     if payload.immagine_base64:
-        import base64 as _b64
         try:
             b64 = payload.immagine_base64
             if b64.startswith("data:"):
                 b64 = b64.split(",", 1)[1]
-            img_bytes = _b64.b64decode(b64)
+            img_bytes = base64.b64decode(b64)
             file_size = len(img_bytes)
             if file_size > 5 * 1024 * 1024:
                 raise HTTPException(status_code=400, detail="Immagine troppo grande (max 5MB)")
@@ -944,7 +830,7 @@ async def create_opl_nativa(payload: OplNativaPayload):
         "numero": numero,
         "titolo": payload.titolo,
         "tipo": "OPL",
-        "formato": "nativa",  # ← distingue dalle OPL file
+        "formato": "nativa",
         "categoria": payload.area_opl_label or "Operativa",
         "reparto": payload.reparto,
         "linea": payload.linea,
@@ -955,14 +841,10 @@ async def create_opl_nativa(payload: OplNativaPayload):
         "stato": "Bozza",
         "versione": 1,
         "numero_progressivo": int(numero.split("-", 1)[1]),
-
-        # File (solo immagine)
         "file_id": file_id,
         "file_name": f"{numero}_immagine.jpg" if file_id else None,
         "file_size": file_size,
         "file_content_type": "image/jpeg" if file_id else None,
-
-        # Payload strutturato OPL
         "opl_data": {
             "area_opl_id": payload.area_opl_id,
             "area_opl_label": payload.area_opl_label,
@@ -975,7 +857,6 @@ async def create_opl_nativa(payload: OplNativaPayload):
             "verifica_2": payload.verifica_2 or "",
             "verifica_3": payload.verifica_3 or "",
         },
-
         "versioni_precedenti": [],
         "kaizen_collegati": [],
         "source": "opl_nativa_form",
@@ -992,21 +873,18 @@ async def create_opl_nativa(payload: OplNativaPayload):
 
 @router.put("/opl-nativa/{documento_id}")
 async def update_opl_nativa(documento_id: str, payload: OplNativaPayload):
-    """Aggiorna una OPL Nativa esistente."""
     existing = await db.documenti.find_one({"_id": ObjectId(documento_id)})
     if not existing:
         raise HTTPException(status_code=404, detail="OPL non trovata")
 
-    # Gestione nuova immagine se cambiata
     file_id = existing.get("file_id")
     file_size = existing.get("file_size", 0)
     if payload.immagine_base64 and not payload.immagine_base64.startswith("__existing"):
-        import base64 as _b64
         try:
             b64 = payload.immagine_base64
             if b64.startswith("data:"):
                 b64 = b64.split(",", 1)[1]
-            img_bytes = _b64.b64decode(b64)
+            img_bytes = base64.b64decode(b64)
             file_size = len(img_bytes)
             if file_size > 5 * 1024 * 1024:
                 raise HTTPException(status_code=400, detail="Immagine troppo grande (max 5MB)")
@@ -1059,9 +937,6 @@ async def update_opl_nativa(documento_id: str, payload: OplNativaPayload):
     updated["_id"] = str(updated["_id"])
     return updated
 
-# ============================================================
-# OPL NATIVA — Salvataggio annotazioni immagine
-# ============================================================
 
 class OplAnnotationsPayload(BaseModel):
     annotations: list = []
@@ -1069,10 +944,6 @@ class OplAnnotationsPayload(BaseModel):
 
 @router.patch("/{documento_id}/opl-annotations")
 async def update_opl_annotations(documento_id: str, payload: OplAnnotationsPayload):
-    """
-    Aggiorna solo l'array di annotazioni dell'immagine di un'OPL Nativa.
-    Le annotazioni sono oggetti JSON con posizione/tipo/dimensioni.
-    """
     existing = await db.documenti.find_one({"_id": ObjectId(documento_id)})
     if not existing:
         raise HTTPException(status_code=404, detail="OPL non trovata")
@@ -1089,74 +960,47 @@ async def update_opl_annotations(documento_id: str, payload: OplAnnotationsPaylo
     )
     return {"message": "Annotazioni salvate", "count": len(payload.annotations or [])}
 
-# ============================================================
-# AUTO-IMPORT DA SHAREPOINT (Power Automate)
-# ============================================================
-import os
-import re
-import base64
+
 from fastapi import Request
+
 
 @router.post("/sharepoint-import")
 async def import_from_sharepoint(request: Request):
-    """
-    Endpoint chiamato da Power Automate quando viene caricato 
-    un file nella cartella SharePoint monitorata.
-    
-    Convenzione naming file:
-      OPL-2025-001_Titolo_Documento.pdf
-      SOP-2025-014_Avviamento_Linea_3.docx
-    
-    Body JSON atteso:
-    {
-      "filename": "OPL-2025-001_Titolo.pdf",
-      "file_content_base64": "JVBERi0xLjQK...",
-      "sharepoint_url": "https://lindt.sharepoint.com/.../file.pdf",
-      "uploaded_by": "giovanni.tosi@lindt.it",
-      "api_key": "SHEETKAIZEN_SECRET_KEY"
-    }
-    """
     data = await request.json()
-    
-    # 🔐 Verifica API key
+
     expected_key = os.getenv("SHAREPOINT_API_KEY", "")
     if not expected_key or data.get("api_key") != expected_key:
         raise HTTPException(status_code=401, detail="API key non valida")
-    
+
     filename = data.get("filename", "")
     file_b64 = data.get("file_content_base64", "")
     sharepoint_url = data.get("sharepoint_url", "")
     uploaded_by = data.get("uploaded_by", "SharePoint Auto")
-    
+
     if not filename or not file_b64:
-        raise HTTPException(
-            status_code=400, 
-            detail="filename e file_content_base64 obbligatori"
-        )
-    
-    # 📝 Parse del nome file: TIPO-ANNO-NUM_Titolo.ext
+        raise HTTPException(status_code=400, detail="filename e file_content_base64 obbligatori")
+
     pattern = r"^(OPL|SOP)-(\d{4}-\d+)_(.+)\.(pdf|docx|xlsx|pptx|png|jpg|jpeg)$"
     match = re.match(pattern, filename, re.IGNORECASE)
-    
+
     if not match:
         raise HTTPException(
             status_code=400,
-            detail=f"Nome file non valido. Atteso formato: TIPO-ANNO-NUM_Titolo.ext (es: OPL-2025-001_Pulizia.pdf). Ricevuto: {filename}"
+            detail=f"Nome file non valido. Atteso formato: TIPO-ANNO-NUM_Titolo.ext. Ricevuto: {filename}"
         )
-    
+
     tipo = match.group(1).upper()
-    numero_part = match.group(2)  # es: 2025-001
+    numero_part = match.group(2)
     titolo_raw = match.group(3)
     estensione = match.group(4).lower()
-    
+
     titolo = titolo_raw.replace("_", " ").strip()
     numero_completo = f"{tipo}-{numero_part}"
-    
-    # 🔍 Controllo duplicati → se esiste, nuova versione
+
     esistente = await db.documenti.find_one({"numero": numero_completo})
     nuova_versione = 1
     versioni_precedenti = []
-    
+
     if esistente:
         nuova_versione = esistente.get("versione", 1) + 1
         versioni_precedenti = esistente.get("versioni_precedenti", [])
@@ -1166,26 +1010,21 @@ async def import_from_sharepoint(request: Request):
             "file_name": esistente.get("file_name"),
             "data": esistente.get("updated_at"),
         })
-    
-    # 📦 Decode base64
+
     try:
         file_bytes = base64.b64decode(file_b64)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Base64 non valido: {str(e)}")
-    
+
     if len(file_bytes) > 50 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="File troppo grande (max 50MB)")
-    
+
     original_size = len(file_bytes)
     final_filename = filename
     compression_info = {}
-    
-    # 🗜️ COMPRESSIONE AUTOMATICA
-    file_bytes, final_filename, compression_info = compress_file(
-        file_bytes, filename, ""
-    )
-    
-    # 💾 Salva su GridFS
+
+    file_bytes, final_filename, compression_info = compress_file(file_bytes, filename, "")
+
     bucket = get_bucket()
     file_id = await bucket.upload_from_stream(
         final_filename,
@@ -1196,9 +1035,8 @@ async def import_from_sharepoint(request: Request):
             "source": "sharepoint_auto",
         }
     )
-    
+
     if esistente:
-        # 🔄 UPDATE documento esistente (nuova versione)
         await db.documenti.update_one(
             {"_id": esistente["_id"]},
             {"$set": {
@@ -1210,7 +1048,7 @@ async def import_from_sharepoint(request: Request):
                 "file_size_originale": original_size,
                 "compressione": compression_info,
                 "versioni_precedenti": versioni_precedenti,
-                "stato": "Bozza",  # richiede ri-approvazione
+                "stato": "Bozza",
                 "sharepoint_url": sharepoint_url,
                 "updated_at": datetime.now(timezone.utc),
             }}
@@ -1224,7 +1062,6 @@ async def import_from_sharepoint(request: Request):
             "messaggio": f"Documento {numero_completo} aggiornato a v{nuova_versione}"
         }
     else:
-        # ➕ CREATE nuovo documento
         doc = {
             "numero": numero_completo,
             "titolo": titolo,
