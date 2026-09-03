@@ -10,11 +10,15 @@ TIPO_CONFIG = Literal[
     "priorita_ap",             # Low, Medium, High, Critical
     "stato_ap",                # Da Valutare, Aperto, In Corso, In Verifica, Done
     "categorie_documento",     # OPL, SOP
+    "area_opl",                # Aree OPL Native
+    "tipo_opl",                # Tipi OPL Native
     "categorie_perdita",
     "cluster_perdita",         # Raggruppamenti perdite per Pareto Pillar
     "argomenti",
     "tipi_meeting",            # Tipi di Meeting/Dashboard
     "categoria_skill",         # Categorie standard LPW per Skill Matrix
+    "categoria_segnalazione_sicurezza",   # Categorie segnalazioni Sicurezza
+    "categoria_segnalazione_ambiente",     # Categorie segnalazioni Ambiente
 ]
 
 
