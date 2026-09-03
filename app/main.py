@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.database import connect_db, close_db
-from app.routes import auth, users, kaizens, action_plans, dashboards, reparti, uploads, documenti, configurazioni, pillars, skill_matrix, pillar_folders, opl_setup, notifications
+from app.routes import auth, users, kaizens, action_plans, dashboards, reparti, uploads, documenti, configurazioni, pillars, skill_matrix, pillar_folders, opl_setup, notifications, segnalazioni
 
 app = FastAPI(title="SheetKaizen API", version="1.1.0")
 
@@ -44,5 +44,6 @@ app.include_router(pillar_folders.router, prefix="/api", tags=["Pillar Folders"]
 app.include_router(opl_setup.router, prefix="/api/setup", tags=["Setup"])
 from app.routes import opl_letture
 app.include_router(opl_letture.router, prefix="/api/opl-letture", tags=["OPL Letture"])
+app.include_router(segnalazioni.router, prefix="/api/segnalazioni", tags=["segnalazioni"])
 app.include_router(notifications.router, prefix="/api/notifications", tags=["Notifications"],
 )
