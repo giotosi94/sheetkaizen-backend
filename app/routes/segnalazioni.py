@@ -53,6 +53,47 @@ async def _genera_codice() -> str:
     return str(int(datetime.now(timezone.utc).timestamp()))
 
 
+async def _terminal_labels() -> set:
+    labels = set()
+    async for config in db.configurazioni.find({"tipo": "stato_ap", "is_terminal": True}):
+        if config.get("label"):
+            labels.add(config["label"])
+    if not labels:
+        labels = {"Chiuso", "Done", "Completato"}
+    return labels
+
+
+async def _linked_action_plans(segnalazione_id: str) -> list:
+    ids = [segnalazione_id]
+    if ObjectId.is_valid(segnalazione_id):
+        ids.append(ObjectId(segnalazione_id))
+    query = {
+        "parent_type": "segnalazione",
+        "parent_id": {"$in": ids},
+        "is_active": {"$ne": False},
+    }
+    plans = []
+    async for plan in db.action_plans.find(query).sort("created_at", -1):
+        plans.append({
+            "_id": str(plan["_id"]),
+            "numero": plan.get("numero"),
+            "titolo": plan.get("titolo"),
+            "tipo": plan.get("tipo"),
+            "stato": plan.get("stato"),
+            "priorita": plan.get("priorita"),
+            "responsabile": plan.get("responsabile"),
+            "data_scadenza": plan.get("data_scadenza"),
+            "is_cancelled": bool(plan.get("is_cancelled")),
+        })
+    return plans
+
+
+async def _conteggio_azioni_aperte(segnalazione_id: str) -> int:
+    plans = await _linked_action_plans(segnalazione_id)
+    terminal = await _terminal_labels()
+    return sum(1 for p in plans if not p["is_cancelled"] and p.get("stato") not in terminal)
+
+
 class SegnalazioneCreate(BaseModel):
     tipo: str = "Sicurezza"
 
@@ -82,15 +123,8 @@ class ClassificazioneUpdate(BaseModel):
     note_gestione: Optional[str] = None
 
 
-class StatoUpdate(BaseModel):
-    stato: str
-
-
-class CollegamentoUpdate(BaseModel):
-    action_plan_id: Optional[str] = None
-    action_plan_numero: Optional[str] = None
-    kaizen_id: Optional[str] = None
-    kaizen_numero: Optional[str] = None
+class ChiusuraPayload(BaseModel):
+    nota_verifica_efficacia: str
 
 
 def _serialize(doc: dict) -> dict:
@@ -170,10 +204,8 @@ async def create_segnalazione(payload: SegnalazioneCreate, current_user: dict = 
         "gravita": None,
         "priorita": None,
         "note_gestione": "",
-        "action_plan_id": None,
-        "action_plan_numero": None,
-        "kaizen_id": None,
-        "kaizen_numero": None,
+        "nota_verifica_efficacia": None,
+        "chiusura_verificata_da": None,
         "data_chiusura": None,
         "is_active": True,
         "created_at": now,
@@ -194,6 +226,20 @@ async def get_segnalazione(segnalazione_id: str, current_user: dict = Depends(ge
     if not _is_admin(current_user) and doc.get("segnalatore_id") != _user_id(current_user):
         raise HTTPException(status_code=403, detail="Non autorizzato")
     return _serialize(doc)
+
+
+@router.get("/{segnalazione_id}/action-plans")
+async def get_action_plans_collegati(segnalazione_id: str, current_user: dict = Depends(get_current_user)):
+    if not ObjectId.is_valid(segnalazione_id):
+        raise HTTPException(status_code=400, detail="ID non valido")
+    plans = await _linked_action_plans(segnalazione_id)
+    terminal = await _terminal_labels()
+    aperti = sum(1 for p in plans if not p["is_cancelled"] and p.get("stato") not in terminal)
+    return {
+        "items": plans,
+        "count": len(plans),
+        "aperti": aperti,
+    }
 
 
 async def _get_editable(segnalazione_id: str, current_user: dict):
@@ -259,46 +305,72 @@ async def classifica(
     return _serialize(updated)
 
 
-@router.patch("/{segnalazione_id}/stato")
-async def cambia_stato(
-    segnalazione_id: str,
-    payload: StatoUpdate,
-    current_user: dict = Depends(get_current_user),
-):
+@router.patch("/{segnalazione_id}/in-gestione")
+async def in_gestione(segnalazione_id: str, current_user: dict = Depends(get_current_user)):
     _require_admin(current_user)
-    if payload.stato not in STATI:
-        raise HTTPException(status_code=400, detail="Stato non valido")
     if not ObjectId.is_valid(segnalazione_id):
         raise HTTPException(status_code=400, detail="ID non valido")
-
-    updates = {"stato": payload.stato, "updated_at": datetime.now(timezone.utc)}
-    if payload.stato == "Chiuso":
-        updates["data_chiusura"] = datetime.now(timezone.utc)
-    else:
-        updates["data_chiusura"] = None
-
-    result = await db.segnalazioni.update_one({"_id": ObjectId(segnalazione_id)}, {"$set": updates})
-    if result.matched_count == 0:
-        raise HTTPException(status_code=404, detail="Segnalazione non trovata")
+    await db.segnalazioni.update_one(
+        {"_id": ObjectId(segnalazione_id)},
+        {"$set": {"stato": "In gestione", "updated_at": datetime.now(timezone.utc)}},
+    )
     updated = await db.segnalazioni.find_one({"_id": ObjectId(segnalazione_id)})
+    if not updated:
+        raise HTTPException(status_code=404, detail="Segnalazione non trovata")
     return _serialize(updated)
 
 
-@router.patch("/{segnalazione_id}/collegamento")
-async def collega(
+@router.patch("/{segnalazione_id}/riapri")
+async def riapri(segnalazione_id: str, current_user: dict = Depends(get_current_user)):
+    _require_admin(current_user)
+    if not ObjectId.is_valid(segnalazione_id):
+        raise HTTPException(status_code=400, detail="ID non valido")
+    await db.segnalazioni.update_one(
+        {"_id": ObjectId(segnalazione_id)},
+        {"$set": {"stato": "In gestione", "data_chiusura": None, "updated_at": datetime.now(timezone.utc)}},
+    )
+    updated = await db.segnalazioni.find_one({"_id": ObjectId(segnalazione_id)})
+    if not updated:
+        raise HTTPException(status_code=404, detail="Segnalazione non trovata")
+    return _serialize(updated)
+
+
+@router.patch("/{segnalazione_id}/chiudi")
+async def chiudi(
     segnalazione_id: str,
-    payload: CollegamentoUpdate,
+    payload: ChiusuraPayload,
     current_user: dict = Depends(get_current_user),
 ):
     _require_admin(current_user)
     if not ObjectId.is_valid(segnalazione_id):
         raise HTTPException(status_code=400, detail="ID non valido")
-    updates = {k: v for k, v in payload.dict().items() if v is not None}
-    updates["updated_at"] = datetime.now(timezone.utc)
-    result = await db.segnalazioni.update_one({"_id": ObjectId(segnalazione_id)}, {"$set": updates})
-    if result.matched_count == 0:
+    doc = await db.segnalazioni.find_one({"_id": ObjectId(segnalazione_id)})
+    if not doc:
         raise HTTPException(status_code=404, detail="Segnalazione non trovata")
-    updated = await db.segnalazioni.find_one({"_id": ObjectId(segnalazione_id)})
+
+    aperti = await _conteggio_azioni_aperte(segnalazione_id)
+    if aperti > 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Impossibile chiudere: {aperti} Action Plan collegat{'o' if aperti == 1 else 'i'} ancora apert{'o' if aperti == 1 else 'i'}",
+        )
+
+    nota = (payload.nota_verifica_efficacia or "").strip()
+    if not nota:
+        raise HTTPException(status_code=400, detail="La nota di verifica efficacia e obbligatoria per chiudere")
+
+    now = datetime.now(timezone.utc)
+    await db.segnalazioni.update_one(
+        {"_id": doc["_id"]},
+        {"$set": {
+            "stato": "Chiuso",
+            "nota_verifica_efficacia": nota,
+            "chiusura_verificata_da": _user_name(current_user),
+            "data_chiusura": now,
+            "updated_at": now,
+        }},
+    )
+    updated = await db.segnalazioni.find_one({"_id": doc["_id"]})
     return _serialize(updated)
 
 
