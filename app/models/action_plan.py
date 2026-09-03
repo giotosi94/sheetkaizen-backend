@@ -67,7 +67,7 @@ class ActionPlanCreate(BaseModel):
     quinta_m: Optional[Literal["Machine", "Manodopera", "Metodo", "Materiale", "Misurazione"]] = None
     
     # === CONTESTO / PARENT ENTITY ===
-    parent_type: Optional[Literal["kaizen", "pillar", "dashboard", "standalone"]] = "standalone"
+    parent_type: Optional[Literal["kaizen", "pillar", "dashboard", "segnalazione", "standalone"]] = "standalone"
     parent_id: Optional[str] = None
     parent_label: Optional[str] = None
     pillar_id: Optional[str] = None
@@ -130,7 +130,7 @@ class ActionPlanUpdate(BaseModel):
     quinta_m: Optional[Literal["Machine", "Manodopera", "Metodo", "Materiale", "Misurazione"]] = None
     
     # Contesto
-    parent_type: Optional[Literal["kaizen", "pillar", "dashboard", "standalone"]] = None
+    parent_type: Optional[Literal["kaizen", "pillar", "dashboard", "segnalazione", "standalone"]] = None
     parent_id: Optional[str] = None
     parent_label: Optional[str] = None
     pillar_id: Optional[str] = None
