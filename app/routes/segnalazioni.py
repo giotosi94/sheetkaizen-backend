@@ -304,11 +304,17 @@ async def termina_inserimento(segnalazione_id: str, current_user: dict = Depends
     doc = await _get_editable(segnalazione_id, current_user)
     if not doc.get("descrizione"):
         raise HTTPException(status_code=400, detail="La descrizione dell'evento e obbligatoria")
+    already_open = doc.get("stato") != "Bozza"
     await db.segnalazioni.update_one(
         {"_id": doc["_id"]},
         {"$set": {"stato": "Aperto", "updated_at": datetime.now(timezone.utc)}},
     )
     updated = await db.segnalazioni.find_one({"_id": doc["_id"]})
+    if not already_open:
+        try:
+            await _notifica_nuova_segnalazione(updated)
+        except Exception:
+            pass
     return _serialize(updated)
 
 
