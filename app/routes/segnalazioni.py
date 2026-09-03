@@ -94,6 +94,31 @@ async def _conteggio_azioni_aperte(segnalazione_id: str) -> int:
     return sum(1 for p in plans if not p["is_cancelled"] and p.get("stato") not in terminal)
 
 
+async def _notifica_nuova_segnalazione(doc: dict):
+    now = datetime.now(timezone.utc)
+    admin_query = {
+        "$or": [
+            {"role": {"$in": ["admin", "administrator", "amministratore"]}},
+            {"ruolo": {"$in": ["admin", "administrator", "amministratore"]}},
+        ]
+    }
+    notifiche = []
+    async for user in db.users.find(admin_query, {"_id": 1}):
+        notifiche.append({
+            "user_id": str(user["_id"]),
+            "title": f"Nuova segnalazione di {doc.get('tipo')}",
+            "message": f"{doc.get('codice')} - {doc.get('reparto') or 'reparto n.d.'} - da {doc.get('segnalatore_nome') or 'operatore'}",
+            "action_url": f"/segnalazioni?open={str(doc['_id'])}",
+            "entity_label": "Segnalazione",
+            "entity_title": doc.get("codice"),
+            "is_read": False,
+            "created_at": now,
+            "read_at": None,
+        })
+    if notifiche:
+        await db.notifications.insert_many(notifiche)
+
+
 class SegnalazioneCreate(BaseModel):
     tipo: str = "Sicurezza"
 
