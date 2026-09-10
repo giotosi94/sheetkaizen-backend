@@ -17,6 +17,13 @@ class RuoliProgetto(BaseModel):
     team_members: List[PersonaRef] = Field(default_factory=list)
 
 
+class RouteRoleAssignment(BaseModel):
+    role_key: str
+    role_label: str
+    assegnazione: str = "single"
+    utenti: List[PersonaRef] = Field(default_factory=list)
+
+
 class MajorKPI(BaseModel):
     nome_kpi: Optional[str] = None
     unita: Optional[str] = None
@@ -50,6 +57,10 @@ class MajorKaizenCreate(BaseModel):
     dashboard_id: Optional[str] = None
     dashboard_nome: Optional[str] = None
 
+    project_leader: Optional[PersonaRef] = None
+    team_members: List[PersonaRef] = Field(default_factory=list)
+    route_role_assignments: List[RouteRoleAssignment] = Field(default_factory=list)
+
     ruoli_progetto: Optional[RuoliProgetto] = None
 
     data_inizio: Optional[str] = None
@@ -78,6 +89,10 @@ class MajorKaizenUpdate(BaseModel):
 
     dashboard_id: Optional[str] = None
     dashboard_nome: Optional[str] = None
+
+    project_leader: Optional[PersonaRef] = None
+    team_members: Optional[List[PersonaRef]] = None
+    route_role_assignments: Optional[List[RouteRoleAssignment]] = None
 
     ruoli_progetto: Optional[RuoliProgetto] = None
 
