@@ -264,6 +264,11 @@ async def change_methodology(kaizen_id: str, payload: ChangeMethodologyPayload):
         raise HTTPException(status_code=404, detail="Kaizen non trovato")
 
     nuovo_livello = payload.nuovo_livello
+    if nuovo_livello == "Major":
+        raise HTTPException(
+            status_code=400,
+            detail="Il Major Kaizen deve essere creato selezionando una Route dal modulo Nuovo Kaizen"
+        )
     if nuovo_livello not in LIVELLI_KAIZEN:
         raise HTTPException(
             status_code=400,
@@ -331,7 +336,7 @@ async def promote_kaizen_legacy(kaizen_id: str, payload: PromotePayload):
         raise HTTPException(status_code=404, detail="Kaizen non trovato")
 
     livello_attuale = kaizen.get("livello") or normalize_livello(None, kaizen.get("tipo"))
-    promotion_map = {"Quick": "Standard", "Standard": "Major"}
+    promotion_map = {"Quick": "Standard"}
     nuovo_livello = promotion_map.get(livello_attuale)
 
     if not nuovo_livello:
