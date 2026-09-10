@@ -35,6 +35,9 @@ class MajorKaizenCreate(BaseModel):
 
     route_id: str
 
+    creatore_id: Optional[str] = None
+    creatore_nome: Optional[str] = None
+
     plant_id: Optional[str] = "induno"
     reparto: Optional[str] = None
     linea: Optional[str] = None
@@ -60,6 +63,9 @@ class MajorKaizenUpdate(BaseModel):
     descrizione: Optional[str] = None
     motivo_strategico: Optional[str] = None
     stato: Optional[str] = None
+
+    creatore_id: Optional[str] = None
+    creatore_nome: Optional[str] = None
 
     plant_id: Optional[str] = None
     reparto: Optional[str] = None
